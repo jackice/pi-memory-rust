@@ -75,8 +75,9 @@ impl SharedEmbedder {
         }
     }
 
-    /// 编码一批文本（模型未就绪返回 None）。
+    /// 编码一批文本（首次调用会触发模型加载；模型不可用返回 None → 调用方降级）。
     pub fn embed(&self, texts: &[String]) -> Option<Vec<Vec<f32>>> {
+        self.ensure_loaded();
         let mut guard = self.inner.lock().expect("锁中毒");
         let embedder = guard.as_mut()?;
         embedder.embed(texts).ok()
