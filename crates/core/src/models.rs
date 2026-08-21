@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryRecord {
     pub id: String,
     pub content: String,
@@ -37,7 +37,7 @@ impl MemoryKind {
 }
 
 /// working_memory 记录（对应 WorkingMemoryRecord）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkingMemoryRecord {
     pub id: String,
     pub content: String,
@@ -62,7 +62,7 @@ pub struct WorkingMemoryRecord {
 }
 
 /// episodic_memory 记录（对应 EpisodicMemoryRecord）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EpisodicMemoryRecord {
     pub id: String,
     pub content: String,
@@ -85,7 +85,7 @@ pub struct EpisodicMemoryRecord {
 }
 
 /// facts 记录（对应 FactRecord）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FactRecord {
     pub fact_id: String,
     pub subject: String,
@@ -99,7 +99,7 @@ pub struct FactRecord {
 }
 
 /// preferences 记录（对应 PreferenceRecord）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PreferenceRecord {
     pub id: String,
     pub preference: String,
@@ -114,7 +114,7 @@ pub struct PreferenceRecord {
 }
 
 /// instructions 记录（对应 InstructionRecord）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstructionRecord {
     pub id: String,
     pub instruction: String,
@@ -130,7 +130,7 @@ pub struct InstructionRecord {
 }
 
 /// timeline 记录（对应 TimelineEventRecord）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TimelineEventRecord {
     pub event_id: String,
     pub date: String,
@@ -144,7 +144,7 @@ pub struct TimelineEventRecord {
 }
 
 /// memory_embeddings 记录（对应 MemoryEmbeddingRecord）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryEmbeddingRecord {
     pub memory_kind: MemoryKind,
     pub memory_id: String,
