@@ -6,6 +6,7 @@
 pub mod core;
 pub mod embedding;
 pub mod embedding_runtime;
+pub mod llm;
 pub mod model_download;
 pub mod models;
 pub mod protocol;

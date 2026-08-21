@@ -86,6 +86,8 @@ pub fn build_recall_injection(
 }
 
 /// 节奏 retain（对应 retainDefaultTurnMemories）。embedding 可用时写入向量。
+/// `llm_result`：TS 侧调 LLM 生成的结构化 JSON（对应 extractStructuredMemories 的 LLM 路径）；
+/// 为 None 时走规则启发式。
 pub fn retain_turn_memories(
     storage: &TursoStorage,
     turn_index: i64,
@@ -93,6 +95,7 @@ pub fn retain_turn_memories(
     session_id: &str,
     project_scope: &str,
     embedding: &mut EmbeddingRuntime,
+    llm_result: Option<&str>,
 ) -> anyhow::Result<()> {
     let current = storage.get_session_state(session_id)?;
     if current.as_ref().map(|s| s.last_retained_user_turn).unwrap_or(0) >= turn_index {
@@ -118,16 +121,82 @@ pub fn retain_turn_memories(
         superseded_by: None,
     })?;
 
-    // 结构化提取（规则路径）并落库
-    let structured = extract_with_heuristics(&ExtractStructuredMemoriesOptions {
-        retained_turn_id: memory_id.clone(),
-        session_id: session_id.to_string(),
-        text: text.to_string(),
-    });
-    storage.insert_facts(&structured.facts)?;
-    storage.insert_preferences(&structured.preferences)?;
-    storage.insert_instructions(&structured.instructions)?;
-    storage.insert_timeline_events(&structured.timeline)?;
+    // 结构化提取：LLM 结果优先（解析失败降级规则路径）
+    let mut structured = None;
+    if let Some(payload) = llm_result {
+        let parsed = crate::llm::parse_llm_extraction(payload);
+        if !parsed.facts.is_empty() || !parsed.preferences.is_empty()
+            || !parsed.instructions.is_empty() || !parsed.timeline.is_empty()
+        {
+            structured = Some(parsed);
+        }
+    }
+    let mut extracted = match structured {
+        Some(parsed) => {
+            // 补全 LLM 结果缺失的 id/session/source 字段
+            let mut parsed = parsed;
+            for fact in &mut parsed.facts {
+                if fact.fact_id.is_empty() {
+                    fact.fact_id = format!("{memory_id}:fact:llm");
+                }
+                fact.source_memory_id = Some(memory_id.clone());
+                fact.session_id = session_id.to_string();
+                if fact.timestamp.is_empty() {
+                    fact.timestamp = crate::core::extraction::EPOCH_ISO.to_string();
+                }
+            }
+            for preference in &mut parsed.preferences {
+                if preference.id.is_empty() {
+                    preference.id = format!("{memory_id}:preference:llm");
+                }
+                preference.source_memory_id = Some(memory_id.clone());
+                preference.session_id = session_id.to_string();
+                if preference.created_at.is_empty() {
+                    preference.created_at = crate::core::extraction::EPOCH_ISO.to_string();
+                }
+            }
+            for instruction in &mut parsed.instructions {
+                if instruction.id.is_empty() {
+                    instruction.id = format!("{memory_id}:instruction:llm");
+                }
+                instruction.source_memory_id = Some(memory_id.clone());
+                instruction.session_id = session_id.to_string();
+                if instruction.created_at.is_empty() {
+                    instruction.created_at = crate::core::extraction::EPOCH_ISO.to_string();
+                }
+            }
+            for event in &mut parsed.timeline {
+                if event.event_id.is_empty() {
+                    event.event_id = format!("{memory_id}:timeline:llm");
+                }
+                event.source = Some("llm".into());
+                event.source_memory_id = Some(memory_id.clone());
+                event.session_id = session_id.to_string();
+                if event.created_at.is_empty() {
+                    event.created_at = crate::core::extraction::EPOCH_ISO.to_string();
+                }
+            }
+            parsed
+        }
+        None => {
+            let rule = extract_with_heuristics(&ExtractStructuredMemoriesOptions {
+                retained_turn_id: memory_id.clone(),
+                session_id: session_id.to_string(),
+                text: text.to_string(),
+            });
+            crate::llm::LlmExtractionResult {
+                facts: rule.facts,
+                preferences: rule.preferences,
+                instructions: rule.instructions,
+                timeline: rule.timeline,
+            }
+        }
+    };
+    storage.insert_facts(&extracted.facts)?;
+    storage.insert_preferences(&extracted.preferences)?;
+    storage.insert_instructions(&extracted.instructions)?;
+    storage.insert_timeline_events(&extracted.timeline)?;
+    let _ = &mut extracted;
 
     storage.save_session_state(&SessionStateRecord {
         session_id: session_id.to_string(),
@@ -141,7 +210,9 @@ pub fn retain_turn_memories(
     Ok(())
 }
 
-/// 会话整合（对应 consolidateDefaultMemories 的规则路径）。
+/// 会话整合（对应 consolidateDefaultMemories）。
+/// `llm_result`：LLM 生成的摘要文本（Some 时作为 episodic content，degraded=false）；
+/// `llm_failed`：LLM 调用失败（degraded=true，内容用规则拼接）。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ConsolidateResult {
     pub degraded: bool,
@@ -153,6 +224,8 @@ pub fn consolidate_session_memories(
     storage: &TursoStorage,
     session_id: &str,
     project_scope: &str,
+    llm_result: Option<&str>,
+    llm_failed: bool,
 ) -> anyhow::Result<ConsolidateResult> {
     let working = storage
         .list_working_by_project(project_scope)?
@@ -175,25 +248,50 @@ pub fn consolidate_session_memories(
         });
     }
 
-    let result = consolidate_core(&ConsolidateSessionMemoriesOptions {
+    let mut consolidated = consolidate_core(&ConsolidateSessionMemoriesOptions {
         session_id: session_id.to_string(),
         project_scope: project_scope.to_string(),
         working_memories: working,
     });
 
+    // LLM 摘要覆盖 content；degraded 标志与 TS 版语义对齐（LLM 失败才 true）
+    if let Some(llm_text) = llm_result {
+        if !llm_text.trim().is_empty() {
+            if let Some(episodic) = consolidated.episodic_memories.first_mut() {
+                episodic.content = llm_text.to_string();
+            }
+        }
+    }
+    consolidated.degraded = llm_failed;
+
     // 落库 episodic（对应 runConsolidationOrchestrator）
-    for episodic in &result.episodic_memories {
+    // 同 session 多次 consolidate 时递增序号，避免固定 id 互相覆盖
+    let existing = storage.count_episodic_by_session(session_id)?;
+    for (offset, episodic) in consolidated.episodic_memories.iter_mut().enumerate() {
+        episodic.id = format!("{session_id}:episodic:{}", existing + offset as i64);
         storage.insert_episodic(episodic)?;
     }
     // 标记 consolidated_at（对应 TS 版 UPDATE 循环）
     let consolidated_at = now_iso();
-    storage.mark_working_consolidated(&result.working_memory_ids, &consolidated_at)?;
+    storage.mark_working_consolidated(&consolidated.working_memory_ids, &consolidated_at)?;
 
     Ok(ConsolidateResult {
-        degraded: result.degraded,
-        working_memory_ids: result.working_memory_ids.clone(),
-        episodic_count: result.episodic_memories.len(),
+        degraded: consolidated.degraded,
+        working_memory_ids: consolidated.working_memory_ids.clone(),
+        episodic_count: consolidated.episodic_memories.len(),
     })
+}
+
+/// 整合源文本：当前 session 未 consolidated 的 working 内容（LLM 输入，对应 TS 版 join("；")）。
+pub fn consolidate_source_text(storage: &TursoStorage, session_id: &str, project_scope: &str) -> String {
+    storage
+        .list_working_by_project(project_scope)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|m| m.session_id == session_id && m.consolidated_at.is_none())
+        .map(|m| m.content)
+        .collect::<Vec<_>>()
+        .join("；")
 }
 
 /// /memory 命令处理（对应 createDefaultMemoryAdmin）。

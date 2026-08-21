@@ -55,6 +55,12 @@ pub mod methods {
     pub const MEMORY_COMMAND: &str = "memoryCommand";
     /// 手动触发模型下载。params: {}
     pub const PREPARE_MODEL: &str = "prepareModel";
+    /// 迁移旧 SQLite 库。params: { sourcePath }
+    pub const MIGRATE: &str = "migrate";
+    /// 获取 LLM prompt 模板。params: {}
+    pub const LLM_PROMPTS: &str = "llmPrompts";
+    /// 获取整合源文本（未 consolidated 的 working 内容）。params: { sessionId, projectScope }
+    pub const CONSOLIDATE_SOURCE: &str = "consolidateSource";
 }
 
 /// hello 请求参数

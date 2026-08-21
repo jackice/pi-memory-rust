@@ -195,6 +195,159 @@ impl TursoStorage {
         collect_first_row(&mut stmt, working_from_row)
     }
 
+    /// 从旧 pi-memory SQLite 库迁移数据（M3 迁移工具）。
+    /// 旧库由 turso_core 直读（SQLite 文件格式兼容）；FTS5 虚拟表忽略（新库 Tantivy 索引自动重建）。
+    pub fn migrate_from(&self, source_path: &str) -> anyhow::Result<serde_json::Value> {
+        let source = TursoStorage::open(source_path)?;
+        let mut stats = serde_json::Map::new();
+
+        // working_memory
+        let rows = source.list_all_working()?;
+        for row in rows {
+            self.insert_working(&row)?;
+        }
+        stats.insert("working".into(), serde_json::json!(self.count_working()?));
+
+        // episodic_memory
+        let rows = source.list_all_episodic()?;
+        for row in rows {
+            self.insert_episodic(&row)?;
+        }
+        stats.insert("episodic".into(), serde_json::json!(self.count_episodic()?));
+
+        // facts / preferences / instructions / timeline
+        let facts = source.list_all_facts()?;
+        self.insert_facts(&facts)?;
+        stats.insert("facts".into(), serde_json::json!(facts.len()));
+        let preferences = source.list_all_preferences()?;
+        self.insert_preferences(&preferences)?;
+        stats.insert("preferences".into(), serde_json::json!(preferences.len()));
+        let instructions = source.list_all_instructions()?;
+        self.insert_instructions(&instructions)?;
+        stats.insert("instructions".into(), serde_json::json!(instructions.len()));
+        let timeline = source.list_all_timeline()?;
+        self.insert_timeline_events(&timeline)?;
+        stats.insert("timeline".into(), serde_json::json!(timeline.len()));
+
+        // embeddings（向量直接迁移，模型信息保留）
+        let embeddings = source.list_all_embeddings()?;
+        let embedding_count = embeddings.len();
+        for embedding in &embeddings {
+            self.save_embedding(embedding)?;
+        }
+        stats.insert("embeddings".into(), serde_json::json!(embedding_count));
+
+        // 重建 FTS 索引（迁移数据后）
+        self.rebuild_fts()?;
+
+        Ok(serde_json::Value::Object(stats))
+    }
+
+    /// 列出全部 working memories（迁移用）。
+    pub fn list_all_working(&self) -> anyhow::Result<Vec<WorkingMemoryRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, embed_text, source, session_id, project_scope,\n                    importance, memory_type, metadata_json, created_at, updated_at,\n                    consolidated_at, valid_until, superseded_by\n             FROM working_memory",
+        )?;
+        collect_rows(&mut stmt, working_from_row)
+    }
+
+    pub fn list_all_episodic(&self) -> anyhow::Result<Vec<EpisodicMemoryRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, summary_of, session_id, project_scope,\n                    importance, tier, metadata_json, memory_type,\n                    created_at, updated_at, degraded_at, valid_until, superseded_by\n             FROM episodic_memory",
+        )?;
+        collect_rows(&mut stmt, episodic_from_row)
+    }
+
+    pub fn list_all_facts(&self) -> anyhow::Result<Vec<FactRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT fact_id, subject, predicate, object, confidence, source_memory_id, session_id, timestamp\n             FROM facts",
+        )?;
+        collect_rows(&mut stmt, |row| {
+            Ok(FactRecord {
+                fact_id: row_to_string(row, 0)?,
+                subject: row_to_string(row, 1)?,
+                predicate: row_to_string(row, 2)?,
+                object: row_to_string(row, 3)?,
+                confidence: row_to_f64(row, 4)?,
+                source_memory_id: row_to_opt_string(row, 5)?,
+                session_id: row_to_string(row, 6)?,
+                timestamp: row_to_string(row, 7)?,
+            })
+        })
+    }
+
+    pub fn list_all_preferences(&self) -> anyhow::Result<Vec<PreferenceRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, preference, topic, context_snippet, source_memory_id, session_id, created_at\n             FROM preferences",
+        )?;
+        collect_rows(&mut stmt, |row| {
+            Ok(PreferenceRecord {
+                id: row_to_string(row, 0)?,
+                preference: row_to_string(row, 1)?,
+                topic: row_to_opt_string(row, 2)?,
+                context_snippet: row_to_opt_string(row, 3)?,
+                source_memory_id: row_to_opt_string(row, 4)?,
+                session_id: row_to_string(row, 5)?,
+                created_at: row_to_string(row, 6)?,
+            })
+        })
+    }
+
+    pub fn list_all_instructions(&self) -> anyhow::Result<Vec<InstructionRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, instruction, topic, active, context_snippet, source_memory_id, session_id, created_at\n             FROM instructions",
+        )?;
+        collect_rows(&mut stmt, |row| {
+            Ok(InstructionRecord {
+                id: row_to_string(row, 0)?,
+                instruction: row_to_string(row, 1)?,
+                topic: row_to_opt_string(row, 2)?,
+                active: row_to_i64(row, 3) != 0,
+                context_snippet: row_to_opt_string(row, 4)?,
+                source_memory_id: row_to_opt_string(row, 5)?,
+                session_id: row_to_string(row, 6)?,
+                created_at: row_to_string(row, 7)?,
+            })
+        })
+    }
+
+    pub fn list_all_timeline(&self) -> anyhow::Result<Vec<TimelineEventRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, date, description, source, source_memory_id, session_id, created_at\n             FROM timeline",
+        )?;
+        collect_rows(&mut stmt, |row| {
+            Ok(TimelineEventRecord {
+                event_id: row_to_string(row, 0)?,
+                date: row_to_string(row, 1)?,
+                description: row_to_string(row, 2)?,
+                source: row_to_opt_string(row, 3)?,
+                source_memory_id: row_to_opt_string(row, 4)?,
+                session_id: row_to_string(row, 5)?,
+                created_at: row_to_string(row, 6)?,
+            })
+        })
+    }
+
+    pub fn list_all_embeddings(&self) -> anyhow::Result<Vec<MemoryEmbeddingRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT memory_kind, memory_id, embedding_json, model\n             FROM memory_embeddings",
+        )?;
+        collect_rows(&mut stmt, |row| {
+            let kind = row_to_string(row, 0)?;
+            let memory_kind = match kind.as_str() {
+                "working" => MemoryKind::Working,
+                "episodic" => MemoryKind::Episodic,
+                _ => MemoryKind::Fact,
+            };
+            Ok(MemoryEmbeddingRecord {
+                memory_kind,
+                memory_id: row_to_string(row, 1)?,
+                embedding: serde_json::from_str(&row_to_string(row, 2)?).unwrap_or_default(),
+                model: row_to_string(row, 3)?,
+            })
+        })
+    }
+
     /// 按项目列出 working memories（created_at DESC）。
     pub fn list_working_by_project(&self, project_scope: &str) -> anyhow::Result<Vec<WorkingMemoryRecord>> {
         let mut stmt = self.conn.prepare(
@@ -423,6 +576,10 @@ impl TursoStorage {
         count_rows_where(&self.conn, "episodic_memory", "project_scope", project_scope)
     }
 
+    pub fn count_episodic_by_session(&self, session_id: &str) -> anyhow::Result<i64> {
+        count_rows_where(&self.conn, "episodic_memory", "session_id", session_id)
+    }
+
     /// 数据库文件路径（diagnose 用）。
     pub fn db_path(&self) -> &str {
         &self.path
@@ -636,9 +793,12 @@ impl TursoStorage {
     }
 
     /// 更新 working_memory 的 consolidated_at（整合后标记）。
+    /// 注意：turso_core 的 Statement 复用存在 bind 残留风险，每条独立 prepare。
     pub fn mark_working_consolidated(&self, ids: &[String], consolidated_at: &str) -> anyhow::Result<()> {
-        let mut stmt = self.conn.prepare("UPDATE working_memory SET consolidated_at = ?1 WHERE id = ?2")?;
         for id in ids {
+            let mut stmt = self
+                .conn
+                .prepare("UPDATE working_memory SET consolidated_at = ?1 WHERE id = ?2")?;
             bind_text(&mut stmt, 1, consolidated_at)?;
             bind_text(&mut stmt, 2, id)?;
             stmt.run_ignore_rows()?;

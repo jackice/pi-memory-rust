@@ -1,0 +1,18 @@
+{
+  "name": "@jackice/pi-memory-rust-darwin-arm64",
+  "version": "0.1.0",
+  "description": "pi-memory-rust native binary for darwin-arm64",
+  "license": "MIT",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "pi-memory-server"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

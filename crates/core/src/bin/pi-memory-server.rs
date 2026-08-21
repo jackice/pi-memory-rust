@@ -107,6 +107,7 @@ fn handle_request(
                     &params.session_id,
                     &params.project_scope,
                     embedding,
+                    params.llm_result.as_deref(),
                 ) {
                     Ok(()) => RpcResponse::ok(request.id, serde_json::json!(null)),
                     Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
@@ -120,6 +121,8 @@ fn handle_request(
                     turso,
                     &params.session_id,
                     &params.project_scope,
+                    params.llm_result.as_deref(),
+                    params.llm_failed,
                 ) {
                     Ok(result) => RpcResponse::ok(
                         request.id,
@@ -130,6 +133,33 @@ fn handle_request(
                 Err(_) => {
                     RpcResponse::err(request.id, codes::INVALID_PARAMS, "consolidateSessionMemories 参数无效")
                 }
+            }
+        }
+        methods::CONSOLIDATE_SOURCE => {
+            match serde_json::from_value::<ConsolidateParams>(request.params.clone()) {
+                Ok(params) => {
+                    let text = pi_memory_core::runtime::consolidate_source_text(
+                        turso, &params.session_id, &params.project_scope,
+                    );
+                    RpcResponse::ok(request.id, serde_json::json!(text))
+                }
+                Err(_) => RpcResponse::err(request.id, codes::INVALID_PARAMS, "consolidateSource 参数无效"),
+            }
+        }
+        methods::LLM_PROMPTS => RpcResponse::ok(
+            request.id,
+            serde_json::json!({
+                "extract": pi_memory_core::llm::EXTRACT_PROMPT,
+                "consolidate": pi_memory_core::llm::CONSOLIDATE_PROMPT,
+            }),
+        ),
+        methods::MIGRATE => {
+            match serde_json::from_value::<MigrateParams>(request.params.clone()) {
+                Ok(params) => match turso.migrate_from(&params.source_path) {
+                    Ok(stats) => RpcResponse::ok(request.id, serde_json::to_value(stats).expect("序列化不会失败")),
+                    Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
+                },
+                Err(_) => RpcResponse::err(request.id, codes::INVALID_PARAMS, "migrate 参数无效"),
             }
         }
         methods::PREPARE_MODEL => {
@@ -188,6 +218,8 @@ struct RetainParams {
     session_id: String,
     #[serde(rename = "projectScope")]
     project_scope: String,
+    #[serde(rename = "llmResult", default)]
+    llm_result: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -196,6 +228,16 @@ struct ConsolidateParams {
     session_id: String,
     #[serde(rename = "projectScope")]
     project_scope: String,
+    #[serde(rename = "llmResult", default)]
+    llm_result: Option<String>,
+    #[serde(rename = "llmFailed", default)]
+    llm_failed: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct MigrateParams {
+    #[serde(rename = "sourcePath")]
+    source_path: String,
 }
 
 #[derive(serde::Deserialize)]

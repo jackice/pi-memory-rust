@@ -5,10 +5,24 @@
   "author": "jackice",
   "license": "MIT",
   "type": "module",
-  "keywords": ["pi", "pi-package", "memory", "rust", "turso", "vector"],
-  "files": ["index.ts", "native", "src", "README.md"],
+  "keywords": [
+    "pi",
+    "pi-package",
+    "memory",
+    "rust",
+    "turso",
+    "vector"
+  ],
+  "files": [
+    "index.ts",
+    "native",
+    "src",
+    "README.md"
+  ],
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   },
   "scripts": {
     "build:native": "napi build --platform --release",
@@ -24,5 +38,11 @@
     "@napi-rs/cli": "^3.0.0",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.3"
+  },
+  "optionalDependencies": {
+    "@jackice/pi-memory-rust-darwin-arm64": "=0.1.0",
+    "@jackice/pi-memory-rust-darwin-x64": "=0.1.0",
+    "@jackice/pi-memory-rust-linux-x64": "=0.1.0",
+    "@jackice/pi-memory-rust-win32-x64": "=0.1.0"
   }
 }
