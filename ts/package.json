@@ -15,7 +15,6 @@
   ],
   "files": [
     "index.ts",
-    "bin",
     "src",
     "README.md"
   ],
@@ -25,9 +24,10 @@
     ]
   },
   "scripts": {
-    "build:native": "napi build --platform --release",
-    "build": "bun scripts/build.ts",
-    "check:types": "tsc --noEmit",
+    "build:binary": "cd .. && cargo build --release && cp target/release/pi-memory-server ts/bin/",
+    "build:leaf": "bun scripts/build-leaf.ts",
+    "build": "bun run build:binary && bun run build:leaf",
+    "pack:verify": "npm pack --dry-run",
     "test": "bun test"
   },
   "peerDependencies": {

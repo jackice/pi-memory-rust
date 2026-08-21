@@ -10,6 +10,9 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { createRequire } from "node:module";
 
 /** 协议版本，与 Rust 侧 `PROTOCOL_VERSION` 保持一致 */
 export const PROTOCOL_VERSION = 1;
@@ -179,10 +182,24 @@ export class MemoryRustClient {
   }
 }
 
-/** 解析 pi-memory-server 二进制路径（env 优先，其次相对 package 目录） */
+/**
+ * 解析 pi-memory-server 二进制路径：
+ * 1. 环境变量 PI_MEMORY_RUST_BINARY（显式指定）
+ * 2. leaf 包（npm 安装场景，@jackice/pi-memory-rust-<platform>-<arch>）
+ * 3. 包内 bin/（本地开发，pi install ./ts 时保留）
+ */
 function resolveBinaryPath(): string {
   const fromEnv = process.env.PI_MEMORY_RUST_BINARY;
   if (fromEnv) return fromEnv;
+  try {
+    const tag = `${process.platform}-${process.arch}`;
+    const require = createRequire(import.meta.url);
+    const leafDir = path.dirname(require.resolve(`@jackice/pi-memory-rust-${tag}/package.json`));
+    const candidate = path.join(leafDir, "pi-memory-server" + (process.platform === "win32" ? ".exe" : ""));
+    if (fs.existsSync(candidate)) return candidate;
+  } catch {
+    // leaf 包未安装（本地开发/未发布），回退包内 bin
+  }
   return new URL("../bin/pi-memory-server", import.meta.url).pathname;
 }
 
