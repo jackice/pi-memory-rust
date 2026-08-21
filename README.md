@@ -1,73 +1,73 @@
 # pi-memory-rust
 
-Rust 重写版 pi-memory：Pi 的本地记忆扩展，存储与检索全部在 Rust 常驻子进程内完成。
+A Rust rewrite of pi-memory: a local memory extension for Pi, with storage and retrieval running entirely inside a persistent Rust subprocess.
 
-## 架构
+## Architecture
 
 ```
-pi 宿主 (Node ≥ 22.19 / Bun)
-└── TS 薄壳 (ts/)                事件绑定 + /memory 命令 + LLM 代理
-        │  JSON-RPC over stdio（常驻进程，崩溃隔离 + 超时强杀）
+Pi host (Node ≥ 22.19 / Bun)
+└── TS shell (ts/)                Event bindings + /memory commands + LLM proxy
+        │  JSON-RPC over stdio (persistent process; crash isolation + timeout kill)
         ▼
-    Rust 子进程 (crates/core)
-    ├── turso_core               存储引擎（SQLite 兼容格式 + Tantivy FTS）
-    ├── turbovec                 向量 ANN（量化 + SIMD + allowlist 精排）[M2]
-    └── ort                      ONNX embedding（all-MiniLM 384 维）[M2]
+    Rust subprocess (crates/core)
+    ├── turso_core                Storage engine (SQLite-compatible format + Tantivy FTS)
+    ├── turbovec                  Vector ANN (quantized + SIMD + allowlist rerank)
+    └── ort                       ONNX embedding (all-MiniLM, 384-dim)
 ```
 
-设计决策（详见 `docs/superpowers/specs/`）：
+Design decisions (see `docs/superpowers/specs/` for the full design):
 
-- **子进程 JSON-RPC 而非 NAPI**：崩溃隔离（Rust 崩溃不影响 pi 宿主）、超时可强杀、工程最轻、与宿主版本无关；低频调用下 NAPI 的性能优势无意义。
-- **重活在子进程内完成**：只交换小负载（prompt、Top-K 候选），embedding 批量不外传。
-- **行为等价**：recall/retain/consolidate 与 TS 参考实现（pi-memory v0.1.2）逐位一致。
+- **Subprocess JSON-RPC instead of NAPI**: crash isolation (a Rust crash never takes down the Pi host), timeout-killable calls, minimal tooling, host-version independent. NAPI's zero-copy advantage is irrelevant at this call frequency.
+- **Heavy work stays in the subprocess**: only small payloads cross the process boundary (prompt, Top-K candidates); embedding batches never leave the Rust process.
+- **Behavior-equivalent**: recall/retain/consolidate are bit-exact with the TS reference implementation (pi-memory v0.1.2).
 
-## 开发
+## Development
 
 ```bash
-# 构建 Rust 服务
+# Build the Rust service
 cargo build --release
 cp target/release/pi-memory-server ts/bin/
 
-# Rust 测试
+# Rust tests
 cargo test
 
-# TS 冒烟测试（常驻进程生命周期 + JSON-RPC 链路）
+# TS smoke tests (process lifecycle + JSON-RPC roundtrip)
 bun test ts/test/
 ```
 
-## 数据隔离
+## Data Isolation
 
-按项目（cwd）**物理隔离**：每个项目独立数据库文件（与 TS 版路径语义一致）。
+**Physical isolation per project (cwd)**: each project gets its own database file (same layout semantics as the TS version).
 
 ```
 <data_dir>/memories/<base64url(projectScope)>/memory.db
-# data_dir 默认 ~/.local/share/pi-memory-rust（PI_MEMORY_DATA_DIR 可覆盖）
+# data_dir defaults to ~/.local/share/pi-memory-rust (override with PI_MEMORY_DATA_DIR)
 ```
 
-- 项目 A 的记忆不会出现在项目 B 的召回中（跨库 + scope 过滤双保险）；
-- 删除项目 = 删除对应目录；单库损坏不影响其他项目；
-- embedding 模型全局共享一份（90MB 不随项目数翻倍），向量索引按项目独立。
+- Project A's memories never appear in project B's recall (cross-db + scope filtering).
+- Deleting a project = deleting its directory; a corrupted db never affects other projects.
+- The embedding model is loaded once globally (~90MB, not per project); vector indexes are isolated per project.
 
-## 状态
+## Status
 
-- [x] M1-T1 工程骨架：cargo workspace、JSON-RPC 协议（版本握手）、TS 客户端（spawn/超时/崩溃重启）
-- [x] M1-T2 存储层移植（turso_core + Tantivy FTS）
-- [x] M1-T3 规则路径移植（recall / extraction / consolidation，行为等价）
-- [x] M1-T4 桥接与 /memory 命令
-- [x] M2 语义 embedding + turbovec 索引（混合召回，FTS 盲区命中 0.01s）
-- [x] M3 LLM 代理（llmResult 单向 RPC）+ 迁移工具（migrate）+ 多平台 leaf 包
+- [x] M1-T1 Scaffold: cargo workspace, JSON-RPC protocol (version handshake), TS client (spawn/timeout/restart)
+- [x] M1-T2 Storage migration (turso_core + Tantivy FTS)
+- [x] M1-T3 Rule-path migration (recall / extraction / consolidation, behavior-equivalent)
+- [x] M1-T4 Bridge + /memory commands
+- [x] M2 Semantic embedding + turbovec index (hybrid recall, FTS blind-spot hit in 0.01s)
+- [x] M3 LLM proxy (one-way llmResult RPC) + migration tool + multi-platform leaf packages
 
-## 功能入口
+## Entry points
 
-| 入口 | 说明 |
+| Entry | Description |
 |---|---|
-| `/memory view\|stats\|diagnose\|clear\|rebuild` | 记忆维护 |
-| `/memory migrate <旧库路径>` | 从 TS 版 pi-memory SQLite 库迁移 |
-| `/memory prepare-model` | 手动触发 embedding 模型下载 |
-| `PI_MEMORY_MODEL_PATH` | 指定模型目录（缺省 `~/.cache/pi-memory-rust/model`） |
-| `PI_MEMORY_RUST_BINARY` | 指定 Rust 二进制路径 |
-| `PI_MEMORY_DB` / `--db` | 指定数据库文件路径 |
+| `/memory view\|stats\|diagnose\|clear\|rebuild` | Memory maintenance |
+| `/memory migrate <path>` | Migrate a legacy pi-memory (TS) SQLite database |
+| `/memory prepare-model` | Manually trigger embedding model download |
+| `PI_MEMORY_MODEL_PATH` | Model directory (default `~/.cache/pi-memory-rust/model`) |
+| `PI_MEMORY_RUST_BINARY` | Explicit path to the Rust binary |
+| `PI_MEMORY_DATA_DIR` | Data directory (default `~/.local/share/pi-memory-rust`) |
 
-## 模型
+## Model
 
-all-MiniLM-L6-v2（384 维，~90MB ONNX）：首次启动后台线程自动下载（HF 官方 + hf-mirror 镜像回退），缺失时自动降级 FTS-only；手动触发见 `/memory prepare-model`。
+all-MiniLM-L6-v2 (384-dim, ~90MB ONNX): auto-downloaded in the background on first start (HF official + hf-mirror fallback); degrades to FTS-only when missing. Manual trigger: `/memory prepare-model`.

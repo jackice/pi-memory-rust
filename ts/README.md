@@ -1,19 +1,25 @@
 # @jackice/pi-memory-rust
 
-Pi 的 Rust 记忆扩展：Turso 存储 + Tantivy FTS + turbovec 向量 + 本地 ONNX embedding。
+A Rust memory extension for Pi: Turso storage + Tantivy FTS + turbovec vectors + local ONNX embedding.
 
-完整文档见仓库根目录 `README.md`（本包为 npm 发布用入口）。
+See the repository root `README.md` for full documentation (this package is the npm distribution entry).
 
-## 结构
+## Layout
 
-- `index.ts` — pi 扩展入口（事件绑定 + /memory 命令 + LLM 代理）
-- `src/client.ts` — JSON-RPC 客户端 + 常驻进程生命周期管理
-- 二进制由 leaf 包提供：`@jackice/pi-memory-rust-<platform>-<arch>`（本包 optionalDependencies）
+- `index.ts` — Pi extension entry (event bindings + /memory commands + LLM proxy)
+- `src/client.ts` — JSON-RPC client + persistent process lifecycle management
+- The native binary ships in per-platform leaf packages: `@jackice/pi-memory-rust-<platform>-<arch>` (declared in `optionalDependencies`)
 
-## 环境变量
+## Environment variables
 
-| 变量 | 说明 |
+| Variable | Description |
 |---|---|
-| `PI_MEMORY_RUST_BINARY` | 指定 Rust 二进制路径（覆盖 leaf 包/包内 bin） |
-| `PI_MEMORY_DATA_DIR` | 数据目录（默认 `~/.local/share/pi-memory-rust`） |
-| `PI_MEMORY_MODEL_PATH` | embedding 模型目录（默认 `~/.cache/pi-memory-rust/model`） |
+| `PI_MEMORY_RUST_BINARY` | Explicit path to the Rust binary (overrides leaf package / bundled binary) |
+| `PI_MEMORY_DATA_DIR` | Data directory (default `~/.local/share/pi-memory-rust`) |
+| `PI_MEMORY_MODEL_PATH` | Embedding model directory (default `~/.cache/pi-memory-rust/model`) |
+
+## Install
+
+```bash
+pi install npm:@jackice/pi-memory-rust
+```
