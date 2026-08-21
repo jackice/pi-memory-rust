@@ -26,3 +26,6 @@ ts/bin/
 
 # pi 会话文件
 .pi/
+
+# leaf 构建产物（npm 发布时由 build-leaf.ts 生成，不入库）
+leaf-packages/
