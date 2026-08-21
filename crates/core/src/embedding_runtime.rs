@@ -54,11 +54,15 @@ impl SharedEmbedder {
         }
         match Embedder::load(&self.model_dir) {
             Ok(e) => {
+                eprintln!("[pi-memory-rust] embedding 模型加载成功: {}", self.model_dir.display());
                 *guard = Some(e);
                 true
             }
             Err(e) => {
-                eprintln!("[pi-memory-rust] embedding 模型加载失败（降级 FTS-only）: {e}");
+                eprintln!(
+                    "[pi-memory-rust] embedding 模型加载失败（降级 FTS-only）: {e}\n  model_dir: {}",
+                    self.model_dir.display()
+                );
                 false
             }
         }
