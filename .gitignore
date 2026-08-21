@@ -1,0 +1,22 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Node / Bun
+node_modules/
+dist/
+
+# 构建产物
+*.node
+native/
+ts/bin/
+
+# 模型与数据库
+*.onnx
+*.db
+*.db-*
+*.sqlite
+.memory/
+
+# 系统
+.DS_Store

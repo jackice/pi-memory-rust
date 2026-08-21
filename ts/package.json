@@ -1,0 +1,28 @@
+{
+  "name": "@jackice/pi-memory-rust",
+  "version": "0.1.0",
+  "description": "Rust 重写版 pi-memory：Turso 存储 + Tantivy FTS + turbovec 向量 + 本地 ONNX embedding",
+  "author": "jackice",
+  "license": "MIT",
+  "type": "module",
+  "keywords": ["pi", "pi-package", "memory", "rust", "turso", "vector"],
+  "files": ["index.ts", "native", "src", "README.md"],
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "scripts": {
+    "build:native": "napi build --platform --release",
+    "build": "bun scripts/build.ts",
+    "check:types": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.2",
+    "@napi-rs/cli": "^3.0.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3"
+  }
+}

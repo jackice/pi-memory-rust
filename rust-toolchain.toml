@@ -1,0 +1,4 @@
+# turbovec 要求 rust-version >= 1.89（AVX-512 内核）
+# 本机 1.97.1 满足；此处锁定最低可编译版本，避免工具链漂移
+[toolchain]
+channel = "1.97.1"

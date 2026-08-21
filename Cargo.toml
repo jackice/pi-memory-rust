@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["jackice"]
+repository = "https://github.com/jackice/pi-memory-rust"
+
+[workspace.dependencies]
+# 存储引擎：Turso（SQLite 兼容 Rust 重写），features 裁剪为嵌入式所需
+turso_core = { version = "0.7.2", default-features = false, features = ["fs", "json", "fts", "uuid"] }
+# 向量索引：TurboQuant 量化 ANN（M2 引入）
+turbovec = "1.0.0"
+# ONNX 推理（embedding，M2 引入）
+ort = { version = "2.0.0", features = ["download-binaries"] }
+# 基础
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "io-std"] }
+anyhow = "1"
+thiserror = "2"
