@@ -7,7 +7,9 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { Model } from "@earendil-works/pi-ai";
 import { MemoryRustClient } from "./src/client.ts";
+import { createPiAiLlmProvider, llmEnabled, type PiAiLlmContext } from "./src/llm.ts";
 
 /** LLM provider 接口（与 pi-memory v0.1.2 的 LlmProvider 对齐）。 */
 export interface LlmProvider {
@@ -42,10 +44,25 @@ export default function registerPiMemoryRustExtension(
     prompts = await client.call("llmPrompts");
   }
 
-  async function runLlm(prompt: string): Promise<{ result?: string; failed: boolean }> {
-    if (!options.llm) return { failed: false };
+  /**
+   * 解析 LLM provider：
+   * 1. 显式注入（options.llm）；
+   * 2. 默认用 pi-ai（当前会话模型），`PI_MEMORY_LLM=off` 可关闭（保持规则路径）；
+   * 3. 无可用模型时返回 undefined（降级规则路径）。
+   */
+  function resolveLlm(ctx: unknown): LlmProvider | undefined {
+    if (options.llm) return options.llm;
+    if (!llmEnabled()) return undefined;
+    const c = ctx as { model?: Model; modelRegistry?: PiAiLlmContext["registry"] } | undefined;
+    if (!c?.model || !c?.modelRegistry) return undefined;
+    return createPiAiLlmProvider({ model: c.model, registry: c.modelRegistry });
+  }
+
+  async function runLlm(prompt: string, ctx: unknown): Promise<{ result?: string; failed: boolean }> {
+    const provider = resolveLlm(ctx);
+    if (!provider) return { failed: false };
     try {
-      return { result: await options.llm.complete(prompt), failed: false };
+      return { result: await provider.complete(prompt), failed: false };
     } catch {
       return { failed: true };
     }
@@ -67,7 +84,7 @@ export default function registerPiMemoryRustExtension(
         sessionId: resolveSessionId(ctx),
         projectScope: resolveProjectScope(ctx),
       });
-      const { result, failed } = await runLlm(`${prompts?.consolidate ?? ""}\n\n${source}`);
+      const { result, failed } = await runLlm(`${prompts?.consolidate ?? ""}\n\n${source}`, ctx);
       await client.call("consolidateSessionMemories", {
         sessionId: resolveSessionId(ctx),
         projectScope: resolveProjectScope(ctx),
@@ -105,7 +122,7 @@ export default function registerPiMemoryRustExtension(
     if (!text) return;
     try {
       await ensurePrompts();
-      const { result, failed } = await runLlm(`${prompts?.extract ?? ""}\n\n${text}`);
+      const { result, failed } = await runLlm(`${prompts?.extract ?? ""}\n\n${text}`, ctx);
       await client.call("retainTurnMemories", {
         turnIndex: event.turnIndex,
         text,
@@ -136,6 +153,11 @@ export default function registerPiMemoryRustExtension(
             sessionId: resolveSessionId(ctx),
             projectScope: resolveProjectScope(ctx),
           });
+        }
+        // diagnose 时附上 TS 侧真实 LLM 状态（Rust 侧无法感知 pi 的 provider）
+        if (sub === "diagnose") {
+          const llm = resolveLlm(ctx);
+          result += ` llm=${llm ? llm.name : "off"}`;
         }
         ctx.ui.notify(result, "info");
       } catch (error) {
