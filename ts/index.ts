@@ -54,6 +54,9 @@ export default function registerPiMemoryRustExtension(
     if (options.llm) return options.llm;
     if (!llmEnabled()) return undefined;
     const c = ctx as { model?: Model; modelRegistry?: PiAiLlmContext["registry"] } | undefined;
+    if (process.env.PI_MEMORY_LLM_DEBUG) {
+      console.error(`[pi-memory-llm] model=${c?.model ? c.model.id : "undefined"} registry=${c?.modelRegistry ? "ok" : "undefined"}`);
+    }
     if (!c?.model || !c?.modelRegistry) return undefined;
     return createPiAiLlmProvider({ model: c.model, registry: c.modelRegistry });
   }
