@@ -45,6 +45,14 @@ pub mod methods {
     pub const DIAGNOSE: &str = "diagnose";
     /// 关闭服务。params: {} → 进程退出
     pub const SHUTDOWN: &str = "shutdown";
+    /// 召回注入。params: { prompt, projectScope, sessionId }
+    pub const BUILD_RECALL_INJECTION: &str = "buildRecallInjection";
+    /// 节奏 retain。params: { turnIndex, text, sessionId, projectScope }
+    pub const RETAIN_TURN_MEMORIES: &str = "retainTurnMemories";
+    /// 会话整合。params: { sessionId, projectScope }
+    pub const CONSOLIDATE_SESSION_MEMORIES: &str = "consolidateSessionMemories";
+    /// /memory 命令。params: { sub, target, projectScope, sessionId }
+    pub const MEMORY_COMMAND: &str = "memoryCommand";
 }
 
 /// hello 请求参数

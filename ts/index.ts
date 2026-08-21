@@ -1,5 +1,5 @@
 /**
- * pi-memory-rust pi 扩展入口（M1 骨架）。
+ * pi-memory-rust pi 扩展入口（M1）。
  *
  * 职责：绑定 pi 事件（before_agent_start / turn_end / session_shutdown）、
  * 注册 /memory 命令、管理 Rust 常驻进程生命周期（通过 MemoryRustClient）。
@@ -8,6 +8,16 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { MemoryRustClient } from "./src/client.ts";
+
+interface UiLike {
+  notify?: (message: string, level?: string) => void;
+}
+
+interface CtxLike {
+  cwd?: string;
+  sessionManager?: { getSessionId?: () => string };
+  ui?: UiLike;
+}
 
 export default function registerPiMemoryRustExtension(pi: ExtensionAPI): void {
   const client = new MemoryRustClient();
@@ -20,7 +30,16 @@ export default function registerPiMemoryRustExtension(pi: ExtensionAPI): void {
     }
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (event, ctx) => {
+    // 会话关闭：先整合（保留语义由 Rust 侧控制），再关闭进程
+    try {
+      await client.call("consolidateSessionMemories", {
+        sessionId: resolveSessionId(ctx),
+        projectScope: resolveProjectScope(ctx),
+      });
+    } catch (error) {
+      notify(ctx as CtxLike | undefined, "consolidate", error);
+    }
     await client.shutdown().catch(() => {});
   });
 
@@ -28,7 +47,8 @@ export default function registerPiMemoryRustExtension(pi: ExtensionAPI): void {
     try {
       const injection = await client.call<string>("buildRecallInjection", {
         prompt: event.prompt,
-        limit: 10,
+        sessionId: resolveSessionId(ctx),
+        projectScope: resolveProjectScope(ctx),
       });
       if (!injection) return;
       return {
@@ -39,18 +59,22 @@ export default function registerPiMemoryRustExtension(pi: ExtensionAPI): void {
         },
       };
     } catch (error) {
-      notify(ctx as { ui?: { notify?: (m: string, l?: string) => void } } | undefined, "recall", error);
+      notify(ctx as CtxLike | undefined, "recall", error);
     }
   });
 
   pi.on("turn_end", async (event, ctx) => {
+    const text = extractText(event.message);
+    if (!text) return;
     try {
       await client.call("retainTurnMemories", {
         turnIndex: event.turnIndex,
-        text: extractText(event.message),
+        text,
+        sessionId: resolveSessionId(ctx),
+        projectScope: resolveProjectScope(ctx),
       });
     } catch (error) {
-      notify(ctx as { ui?: { notify?: (m: string, l?: string) => void } } | undefined, "retain", error);
+      notify(ctx as CtxLike | undefined, "retain", error);
     }
   });
 
@@ -58,15 +82,28 @@ export default function registerPiMemoryRustExtension(pi: ExtensionAPI): void {
     description: "pi-memory-rust 记忆维护（view/stats/diagnose/clear/rebuild）",
     handler: async (args, ctx) => {
       const [sub, ...rest] = (args ?? "").split(/\s+/).filter(Boolean);
-      const target = rest[0] ?? "";
       try {
-        const result = await client.call<string>("memoryCommand", { sub: sub ?? "view", target });
+        const result = await client.call<string>("memoryCommand", {
+          sub: sub ?? "view",
+          target: rest.join(" "),
+          sessionId: resolveSessionId(ctx),
+          projectScope: resolveProjectScope(ctx),
+        });
         ctx.ui.notify(result, "info");
       } catch (error) {
         notify(ctx, "command", error);
       }
     },
   });
+}
+
+function resolveProjectScope(ctx: unknown): string {
+  return (ctx as { cwd?: string } | undefined)?.cwd ?? process.cwd();
+}
+
+function resolveSessionId(ctx: unknown): string {
+  const sessionManager = (ctx as { sessionManager?: { getSessionId?: () => string } } | undefined)?.sessionManager;
+  return sessionManager?.getSessionId?.() ?? process.env.PI_SESSION_ID ?? "default-session";
 }
 
 function extractText(message: unknown): string {
@@ -82,7 +119,7 @@ function extractText(message: unknown): string {
 }
 
 function notify(
-  ctx: { ui?: { notify?: (message: string, level?: string) => void } } | undefined,
+  ctx: { ui?: UiLike } | undefined,
   phase: string,
   error: unknown,
 ): void {

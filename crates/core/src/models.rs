@@ -151,3 +151,12 @@ pub struct MemoryEmbeddingRecord {
     pub embedding: Vec<f64>,
     pub model: String,
 }
+
+/// session_state 记录（对应 SessionStateRecord）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionStateRecord {
+    pub session_id: String,
+    pub project_scope: String,
+    pub last_retained_user_turn: i64,
+    pub has_recalled_for_first_turn: bool,
+}

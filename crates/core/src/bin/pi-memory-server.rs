@@ -40,7 +40,7 @@ fn write_frame(writer: &mut impl Write, payload: &str) -> std::io::Result<()> {
 }
 
 /// 处理单个请求，返回响应 JSON
-fn handle_request(request: &RpcRequest, storage: &mut dyn Storage) -> serde_json::Value {
+fn handle_request(request: &RpcRequest, turso: &mut TursoStorage) -> serde_json::Value {
     let response = match request.method.as_str() {
         methods::HELLO => {
             let params: HelloParams = match serde_json::from_value(request.params.clone()) {
@@ -71,10 +71,72 @@ fn handle_request(request: &RpcRequest, storage: &mut dyn Storage) -> serde_json
                 )
             }
         }
-        methods::DIAGNOSE => match storage.diagnose() {
+        methods::DIAGNOSE => match turso.diagnose() {
             Ok(info) => RpcResponse::ok(request.id, info),
             Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
         },
+        methods::BUILD_RECALL_INJECTION => {
+            match serde_json::from_value::<RecallParams>(request.params.clone()) {
+                Ok(params) => match pi_memory_core::runtime::build_recall_injection(
+                    turso,
+                    &params.prompt,
+                    &params.project_scope,
+                    &params.session_id,
+                ) {
+                    Ok(text) => RpcResponse::ok(request.id, serde_json::json!(text)),
+                    Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
+                },
+                Err(_) => RpcResponse::err(request.id, codes::INVALID_PARAMS, "buildRecallInjection 参数无效"),
+            }
+        }
+        methods::RETAIN_TURN_MEMORIES => {
+            match serde_json::from_value::<RetainParams>(request.params.clone()) {
+                Ok(params) => match pi_memory_core::runtime::retain_turn_memories(
+                    turso,
+                    params.turn_index,
+                    &params.text,
+                    &params.session_id,
+                    &params.project_scope,
+                ) {
+                    Ok(()) => RpcResponse::ok(request.id, serde_json::json!(null)),
+                    Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
+                },
+                Err(_) => RpcResponse::err(request.id, codes::INVALID_PARAMS, "retainTurnMemories 参数无效"),
+            }
+        }
+        methods::CONSOLIDATE_SESSION_MEMORIES => {
+            match serde_json::from_value::<ConsolidateParams>(request.params.clone()) {
+                Ok(params) => match pi_memory_core::runtime::consolidate_session_memories(
+                    turso,
+                    &params.session_id,
+                    &params.project_scope,
+                ) {
+                    Ok(result) => RpcResponse::ok(
+                        request.id,
+                        serde_json::to_value(result).expect("序列化不会失败"),
+                    ),
+                    Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
+                },
+                Err(_) => {
+                    RpcResponse::err(request.id, codes::INVALID_PARAMS, "consolidateSessionMemories 参数无效")
+                }
+            }
+        }
+        methods::MEMORY_COMMAND => {
+            match serde_json::from_value::<MemoryCommandParams>(request.params.clone()) {
+                Ok(params) => match pi_memory_core::runtime::memory_command(
+                    turso,
+                    &params.sub,
+                    &params.target,
+                    &params.project_scope,
+                    &params.session_id,
+                ) {
+                    Ok(text) => RpcResponse::ok(request.id, serde_json::json!(text)),
+                    Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
+                },
+                Err(_) => RpcResponse::err(request.id, codes::INVALID_PARAMS, "memoryCommand 参数无效"),
+            }
+        }
         methods::SHUTDOWN => {
             // 由主循环在响应后退出
             RpcResponse::ok(request.id, serde_json::json!({ "bye": true }))
@@ -82,6 +144,49 @@ fn handle_request(request: &RpcRequest, storage: &mut dyn Storage) -> serde_json
         _ => RpcResponse::err(request.id, codes::METHOD_NOT_FOUND, "未知方法"),
     };
     serde_json::to_value(response).expect("序列化不会失败")
+}
+
+// ---------------------------------------------------------------------------
+// RPC 参数类型
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct RecallParams {
+    prompt: String,
+    #[serde(rename = "projectScope")]
+    project_scope: String,
+    #[serde(rename = "sessionId")]
+    session_id: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RetainParams {
+    #[serde(rename = "turnIndex")]
+    turn_index: i64,
+    text: String,
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    #[serde(rename = "projectScope")]
+    project_scope: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ConsolidateParams {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    #[serde(rename = "projectScope")]
+    project_scope: String,
+}
+
+#[derive(serde::Deserialize)]
+struct MemoryCommandParams {
+    sub: String,
+    #[serde(default)]
+    target: String,
+    #[serde(rename = "projectScope")]
+    project_scope: String,
+    #[serde(rename = "sessionId")]
+    session_id: String,
 }
 
 fn main() {
@@ -111,18 +216,19 @@ fn parse_db_path() -> String {
     if let Ok(path) = std::env::var("PI_MEMORY_DB") {
         return path;
     }
-    std::env::temp_dir()
-        .join("pi-memory-rust")
-        .join("default.db")
-        .to_string_lossy()
-        .into_owned()
+    let fallback = std::env::temp_dir().join("pi-memory-rust").join("default.db");
+    if let Some(parent) = fallback.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    fallback.to_string_lossy().into_owned()
 }
 
-fn serve(storage: &mut dyn Storage) {
+fn serve(turso: &mut TursoStorage) {
     let stdin = std::io::stdin();
     let mut reader = std::io::BufReader::new(stdin.lock());
     let stdout = std::io::stdout();
     let mut writer = std::io::BufWriter::new(stdout.lock());
+
 
     loop {
         let frame = match read_frame(&mut reader) {
@@ -141,7 +247,7 @@ fn serve(storage: &mut dyn Storage) {
             }
         };
         let shutdown = request.method == methods::SHUTDOWN;
-        let payload = handle_request(&request, storage);
+        let payload = handle_request(&request, turso);
         if let Err(e) = write_frame(&mut writer, &payload.to_string()) {
             eprintln!("[pi-memory-rust] 写入失败: {e}");
             break;

@@ -31,6 +31,8 @@ export interface RpcResponse {
 export interface ClientOptions {
   /** pi-memory-server 二进制路径；缺省时按环境变量/相对路径解析 */
   binaryPath?: string;
+  /** 数据库文件路径；缺省时由服务端使用默认路径（PI_MEMORY_DB/临时目录） */
+  dbPath?: string;
   callTimeoutMs?: number;
   /** 进程崩溃后的最大重启次数 */
   maxRestarts?: number;
@@ -50,6 +52,7 @@ export class MemoryRustClient {
   constructor(options: ClientOptions = {}) {
     this.options = {
       binaryPath: options.binaryPath ?? resolveBinaryPath(),
+      dbPath: options.dbPath,
       callTimeoutMs: options.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS,
       maxRestarts: options.maxRestarts ?? 3,
       log: options.log ?? ((line) => process.stderr.write(`[pi-memory-rust] ${line}\n`)),
@@ -103,7 +106,8 @@ export class MemoryRustClient {
 
   private startProcess(): void {
     this.restartCount = 0;
-    const proc = spawn(this.options.binaryPath, [], { stdio: ["pipe", "pipe", "pipe"] });
+    const args = this.options.dbPath ? ["--db", this.options.dbPath] : [];
+    const proc = spawn(this.options.binaryPath, args, { stdio: ["pipe", "pipe", "pipe"] });
     this.proc = proc;
     proc.stdout.on("data", (chunk: Buffer) => this.onData(chunk));
     proc.stderr.on("data", (chunk: Buffer) => {

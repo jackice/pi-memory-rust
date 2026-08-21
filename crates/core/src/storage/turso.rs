@@ -13,7 +13,7 @@ use turso_core::{Connection, Database, DatabaseOpts, Numeric, OpenFlags, Row, St
 
 use crate::models::{
     EpisodicMemoryRecord, FactRecord, InstructionRecord, MemoryEmbeddingRecord, MemoryKind,
-    PreferenceRecord, TimelineEventRecord, WorkingMemoryRecord,
+    PreferenceRecord, SessionStateRecord, TimelineEventRecord, WorkingMemoryRecord,
 };
 
 use super::Storage;
@@ -414,6 +414,99 @@ impl TursoStorage {
         Ok(())
     }
 
+    /// 按项目统计 working/episodic 条数（stats 命令用）。
+    pub fn count_working_by_project(&self, project_scope: &str) -> anyhow::Result<i64> {
+        count_rows_where(&self.conn, "working_memory", "project_scope", project_scope)
+    }
+
+    pub fn count_episodic_by_project(&self, project_scope: &str) -> anyhow::Result<i64> {
+        count_rows_where(&self.conn, "episodic_memory", "project_scope", project_scope)
+    }
+
+    /// 数据库文件路径（diagnose 用）。
+    pub fn db_path(&self) -> &str {
+        &self.path
+    }
+
+    /// 结构化表 LIKE 搜索（queryStructuredCandidates 对应）。
+    pub fn search_facts_like(&self, query: &str) -> anyhow::Result<Vec<FactRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT fact_id, subject, predicate, object, confidence, source_memory_id, session_id, timestamp
+             FROM facts WHERE subject LIKE ?1 OR predicate LIKE ?1 OR object LIKE ?1",
+        )?;
+        bind_text(&mut stmt, 1, &format!("%{query}%"))?;
+        collect_rows(&mut stmt, |row| {
+            Ok(FactRecord {
+                fact_id: row_to_string(row, 0)?,
+                subject: row_to_string(row, 1)?,
+                predicate: row_to_string(row, 2)?,
+                object: row_to_string(row, 3)?,
+                confidence: row_to_f64(row, 4)?,
+                source_memory_id: row_to_opt_string(row, 5)?,
+                session_id: row_to_string(row, 6)?,
+                timestamp: row_to_string(row, 7)?,
+            })
+        })
+    }
+
+    pub fn search_instructions_like(&self, query: &str) -> anyhow::Result<Vec<InstructionRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, instruction, topic, active, context_snippet, source_memory_id, session_id, created_at
+             FROM instructions WHERE instruction LIKE ?1",
+        )?;
+        bind_text(&mut stmt, 1, &format!("%{query}%"))?;
+        collect_rows(&mut stmt, |row| {
+            Ok(InstructionRecord {
+                id: row_to_string(row, 0)?,
+                instruction: row_to_string(row, 1)?,
+                topic: row_to_opt_string(row, 2)?,
+                active: row_to_i64(row, 3) != 0,
+                context_snippet: row_to_opt_string(row, 4)?,
+                source_memory_id: row_to_opt_string(row, 5)?,
+                session_id: row_to_string(row, 6)?,
+                created_at: row_to_string(row, 7)?,
+            })
+        })
+    }
+
+    pub fn search_preferences_like(&self, query: &str) -> anyhow::Result<Vec<PreferenceRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, preference, topic, context_snippet, source_memory_id, session_id, created_at
+             FROM preferences WHERE preference LIKE ?1",
+        )?;
+        bind_text(&mut stmt, 1, &format!("%{query}%"))?;
+        collect_rows(&mut stmt, |row| {
+            Ok(PreferenceRecord {
+                id: row_to_string(row, 0)?,
+                preference: row_to_string(row, 1)?,
+                topic: row_to_opt_string(row, 2)?,
+                context_snippet: row_to_opt_string(row, 3)?,
+                source_memory_id: row_to_opt_string(row, 4)?,
+                session_id: row_to_string(row, 5)?,
+                created_at: row_to_string(row, 6)?,
+            })
+        })
+    }
+
+    pub fn search_timeline_like(&self, query: &str) -> anyhow::Result<Vec<TimelineEventRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, date, description, source, source_memory_id, session_id, created_at
+             FROM timeline WHERE date LIKE ?1 OR description LIKE ?1",
+        )?;
+        bind_text(&mut stmt, 1, &format!("%{query}%"))?;
+        collect_rows(&mut stmt, |row| {
+            Ok(TimelineEventRecord {
+                event_id: row_to_string(row, 0)?,
+                date: row_to_string(row, 1)?,
+                description: row_to_string(row, 2)?,
+                source: row_to_opt_string(row, 3)?,
+                source_memory_id: row_to_opt_string(row, 4)?,
+                session_id: row_to_string(row, 5)?,
+                created_at: row_to_string(row, 6)?,
+            })
+        })
+    }
+
     /// 按 session 列出结构化记忆（facts/preferences/instructions/timeline 的 count 汇总由 diagnose 使用）。
     pub fn count_by_session(&self, table: &str, session_id: &str) -> anyhow::Result<i64> {
         let sql = format!("SELECT COUNT(*) FROM {table} WHERE session_id = ?1");
@@ -481,6 +574,94 @@ impl TursoStorage {
             return Err(e);
         }
         Ok(found)
+    }
+
+    // -----------------------------------------------------------------------
+    // session_state
+    // -----------------------------------------------------------------------
+
+    pub fn get_session_state(&self, session_id: &str) -> anyhow::Result<Option<SessionStateRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, project_scope, last_retained_user_turn, has_recalled_for_first_turn
+             FROM session_state WHERE session_id = ?1",
+        )?;
+        bind_text(&mut stmt, 1, session_id)?;
+        let mut found = None;
+        let mut err = None;
+        stmt.run_with_row_callback(|row| {
+            match (
+                row_to_string(row, 0),
+                row_to_string(row, 1),
+                row_to_i64(row, 2),
+                row_to_i64(row, 3),
+            ) {
+                (Ok(sid), Ok(scope), turn, recalled) => {
+                    found = Some(SessionStateRecord {
+                        session_id: sid,
+                        project_scope: scope,
+                        last_retained_user_turn: turn,
+                        has_recalled_for_first_turn: recalled != 0,
+                    });
+                    Ok(())
+                }
+                (Err(e), _, _, _) => {
+                    err = Some(e);
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        })?;
+        if let Some(e) = err {
+            return Err(e);
+        }
+        Ok(found)
+    }
+
+    pub fn save_session_state(&self, record: &SessionStateRecord) -> anyhow::Result<()> {
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO session_state (session_id, project_scope, last_retained_user_turn, has_recalled_for_first_turn)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(session_id) DO UPDATE SET
+                project_scope = excluded.project_scope,
+                last_retained_user_turn = excluded.last_retained_user_turn,
+                has_recalled_for_first_turn = excluded.has_recalled_for_first_turn,
+                updated_at = CURRENT_TIMESTAMP",
+        )?;
+        bind_text(&mut stmt, 1, &record.session_id)?;
+        bind_text(&mut stmt, 2, &record.project_scope)?;
+        bind_int(&mut stmt, 3, record.last_retained_user_turn)?;
+        bind_int(&mut stmt, 4, record.has_recalled_for_first_turn as i64)?;
+        stmt.run_ignore_rows()?;
+        Ok(())
+    }
+
+    /// 更新 working_memory 的 consolidated_at（整合后标记）。
+    pub fn mark_working_consolidated(&self, ids: &[String], consolidated_at: &str) -> anyhow::Result<()> {
+        let mut stmt = self.conn.prepare("UPDATE working_memory SET consolidated_at = ?1 WHERE id = ?2")?;
+        for id in ids {
+            bind_text(&mut stmt, 1, consolidated_at)?;
+            bind_text(&mut stmt, 2, id)?;
+            stmt.run_ignore_rows()?;
+        }
+        Ok(())
+    }
+
+    /// 按项目删除 working/episodic 记忆（clear 命令用）。
+    pub fn clear_project_memories(&self, project_scope: &str) -> anyhow::Result<()> {
+        for table in ["working_memory", "episodic_memory"] {
+            let sql = format!("DELETE FROM {table} WHERE project_scope = ?1");
+            let mut stmt = self.conn.prepare(&sql)?;
+            bind_text(&mut stmt, 1, project_scope)?;
+            stmt.run_ignore_rows()?;
+        }
+        // 全局表清空（与 TS 版 clear 一致）
+        for table in [
+            "memory_embeddings", "facts", "preferences", "instructions", "timeline", "session_state",
+        ] {
+            let sql = format!("DELETE FROM {table}");
+            self.conn.execute(&sql)?;
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -648,6 +829,14 @@ fn collect_rows_with_score<T>(
 fn count_rows(conn: &Arc<Connection>, table: &str) -> anyhow::Result<i64> {
     let sql = format!("SELECT COUNT(*) FROM {table}");
     let rows = conn.prepare(&sql)?.run_collect_rows()?;
+    Ok(rows.first().map(|row| value_to_i64(&row[0])).unwrap_or(0))
+}
+
+fn count_rows_where(conn: &Arc<Connection>, table: &str, column: &str, value: &str) -> anyhow::Result<i64> {
+    let sql = format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1");
+    let mut stmt = conn.prepare(&sql)?;
+    bind_text(&mut stmt, 1, value)?;
+    let rows = stmt.run_collect_rows()?;
     Ok(rows.first().map(|row| value_to_i64(&row[0])).unwrap_or(0))
 }
 
