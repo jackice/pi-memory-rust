@@ -9,6 +9,7 @@ pub mod embedding_runtime;
 pub mod llm;
 pub mod model_download;
 pub mod models;
+pub mod paths;
 pub mod protocol;
 pub mod runtime;
 pub mod storage;

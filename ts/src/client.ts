@@ -10,9 +10,6 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
 
 /** 协议版本，与 Rust 侧 `PROTOCOL_VERSION` 保持一致 */
 export const PROTOCOL_VERSION = 1;
@@ -34,8 +31,6 @@ export interface RpcResponse {
 export interface ClientOptions {
   /** pi-memory-server 二进制路径；缺省时按环境变量/相对路径解析 */
   binaryPath?: string;
-  /** 数据库文件路径；缺省时由服务端使用默认路径（PI_MEMORY_DB/临时目录） */
-  dbPath?: string;
   callTimeoutMs?: number;
   /** 进程崩溃后的最大重启次数 */
   maxRestarts?: number;
@@ -55,7 +50,6 @@ export class MemoryRustClient {
   constructor(options: ClientOptions = {}) {
     this.options = {
       binaryPath: options.binaryPath ?? resolveBinaryPath(),
-      dbPath: options.dbPath ?? resolveDefaultDbPath(),
       callTimeoutMs: options.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS,
       maxRestarts: options.maxRestarts ?? 3,
       log: options.log ?? ((line) => process.stderr.write(`[pi-memory-rust] ${line}\n`)),
@@ -109,12 +103,8 @@ export class MemoryRustClient {
 
   private startProcess(): void {
     this.restartCount = 0;
-    const args = this.options.dbPath ? ["--db", this.options.dbPath] : [];
-    // 确保数据库父目录存在（turso 不自动创建）
-    if (this.options.dbPath) {
-      fs.mkdirSync(path.dirname(this.options.dbPath), { recursive: true });
-    }
-    const proc = spawn(this.options.binaryPath, args, { stdio: ["pipe", "pipe", "pipe"] });
+    // 数据库路径由 Rust 侧按 projectScope 管理（单进程多库，物理隔离）
+    const proc = spawn(this.options.binaryPath, [], { stdio: ["pipe", "pipe", "pipe"] });
     this.proc = proc;
     proc.stdout.on("data", (chunk: Buffer) => this.onData(chunk));
     proc.stderr.on("data", (chunk: Buffer) => {
@@ -196,10 +186,3 @@ function resolveBinaryPath(): string {
   return new URL("../bin/pi-memory-server", import.meta.url).pathname;
 }
 
-/** 解析默认数据库路径（持久，非临时目录）：XDG_DATA_HOME 或 ~/.local/share */
-function resolveDefaultDbPath(): string {
-  const fromEnv = process.env.PI_MEMORY_DB;
-  if (fromEnv) return fromEnv;
-  const base = process.env.XDG_DATA_HOME ?? path.join(os.homedir(), ".local", "share");
-  return path.join(base, "pi-memory-rust", "memory.db");
-}

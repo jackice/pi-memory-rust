@@ -11,7 +11,7 @@ use crate::core::extraction::{
     extract_with_heuristics, ExtractStructuredMemoriesOptions, EPOCH_ISO,
 };
 use crate::core::recall::{recall_memories, RecallCandidateInput, RecallMemoriesOptions};
-use crate::embedding_runtime::EmbeddingRuntime;
+use crate::embedding_runtime::{ProjectVectors, SharedEmbedder};
 use crate::models::{MemoryKind, SessionStateRecord, WorkingMemoryRecord};
 use crate::storage::TursoStorage;
 
@@ -22,7 +22,8 @@ pub fn build_recall_injection(
     prompt: &str,
     project_scope: &str,
     session_id: &str,
-    embedding: &mut EmbeddingRuntime,
+    shared: &SharedEmbedder,
+    vectors: &mut ProjectVectors,
 ) -> anyhow::Result<String> {
     let _working = storage.list_working_by_project(project_scope)?;
     let _episodic = storage.list_episodic_by_project(project_scope)?;
@@ -44,8 +45,8 @@ pub fn build_recall_injection(
     fts_candidates.extend(rank_episodic_candidates(&episodic_hits, MemoryKind::Episodic));
 
     // embedding 精排：allowlist = FTS 候选（SIMD 内核内过滤，取代 TS 版全扫描）
-    let embedding_candidates = embedding
-        .build_embedding_candidates(prompt, &fts_memories)?
+    let embedding_candidates = vectors
+        .build_embedding_candidates(shared, prompt, &fts_memories)?
         .into_iter()
         .map(|c| RecallCandidateInput {
             memory_id: c.memory_id,
@@ -94,7 +95,8 @@ pub fn retain_turn_memories(
     text: &str,
     session_id: &str,
     project_scope: &str,
-    embedding: &mut EmbeddingRuntime,
+    shared: &SharedEmbedder,
+    vectors: &mut ProjectVectors,
     llm_result: Option<&str>,
 ) -> anyhow::Result<()> {
     let current = storage.get_session_state(session_id)?;
@@ -206,7 +208,7 @@ pub fn retain_turn_memories(
     })?;
 
     // embedding 入库（失败不阻塞 retain 主流程）
-    let _ = embedding.save_embedding(storage, MemoryKind::Working, &memory_id, text);
+    let _ = vectors.save_embedding(storage, shared, MemoryKind::Working, &memory_id, text);
     Ok(())
 }
 

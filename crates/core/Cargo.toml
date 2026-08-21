@@ -20,3 +20,4 @@ tokenizers.workspace = true
 ndarray.workspace = true
 ureq.workspace = true
 turbovec.workspace = true
+base64.workspace = true

@@ -35,6 +35,19 @@ cargo test
 bun test ts/test/
 ```
 
+## 数据隔离
+
+按项目（cwd）**物理隔离**：每个项目独立数据库文件（与 TS 版路径语义一致）。
+
+```
+<data_dir>/memories/<base64url(projectScope)>/memory.db
+# data_dir 默认 ~/.local/share/pi-memory-rust（PI_MEMORY_DATA_DIR 可覆盖）
+```
+
+- 项目 A 的记忆不会出现在项目 B 的召回中（跨库 + scope 过滤双保险）；
+- 删除项目 = 删除对应目录；单库损坏不影响其他项目；
+- embedding 模型全局共享一份（90MB 不随项目数翻倍），向量索引按项目独立。
+
 ## 状态
 
 - [x] M1-T1 工程骨架：cargo workspace、JSON-RPC 协议（版本握手）、TS 客户端（spawn/超时/崩溃重启）

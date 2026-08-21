@@ -1,12 +1,12 @@
-//! embedding 运行时组件（M2）：embedder + turbovec 索引 + 记忆 id 映射。
+//! embedding 运行时组件（M2 重构）：Embedder 全局共享，向量索引按项目独立。
 //!
-//! 职责：
-//! - 延迟加载 ONNX 模型（失败 → 降级 FTS-only，不阻塞主流程）；
-//! - retain 时：embed 文本 → 存 DB（memory_embeddings）→ 入向量索引；
-//! - recall 时：embed prompt → FTS 候选 id 集合作 allowlist → turbovec 精排。
+//! 多库隔离下：ONNX 模型（~90MB）全局只加载一份（Arc<Mutex>），
+//! 每个项目（projectScope）拥有独立的 VectorIndex 与 id 映射，互不串扰。
+//! RPC 主循环单线程串行，Mutex 无实际竞争。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use crate::embedding::Embedder;
 use crate::models::{MemoryEmbeddingRecord, MemoryKind};
@@ -23,77 +23,38 @@ pub fn default_model_dir() -> PathBuf {
         .unwrap_or_else(|_| std::env::temp_dir().join("pi-memory-rust").join("model"))
 }
 
-/// embedding 运行时（embedder 可缺失 → 降级）。
-pub struct EmbeddingRuntime {
-    embedder: Option<Embedder>,
-    index: VectorIndex,
-    /// vector_id → (memory_kind, memory_id)
-    id_to_memory: HashMap<u64, (MemoryKind, String)>,
-    /// (kind, memory_id) → vector_id
-    memory_to_id: HashMap<(MemoryKind, String), u64>,
-    /// (kind, memory_id) → content（召回注入用，避免跨进程回查）
-    content_map: HashMap<(MemoryKind, String), String>,
+/// 全局共享的 Embedder 句柄（模型只加载一份）。
+#[derive(Clone)]
+pub struct SharedEmbedder {
+    inner: Arc<Mutex<Option<Embedder>>>,
     model_dir: PathBuf,
 }
 
-impl EmbeddingRuntime {
-    /// 创建运行时并尝试加载模型（失败仅记录，不报错）。
+impl SharedEmbedder {
     pub fn new() -> Self {
-        let model_dir = default_model_dir();
-        let embedder = match crate::model_download::model_dir_complete(&model_dir) {
-            true => match Embedder::load(&model_dir) {
-                Ok(e) => Some(e),
-                Err(e) => {
-                    eprintln!("[pi-memory-rust] embedding 模型加载失败（降级 FTS-only）: {e}");
-                    None
-                }
-            },
-            false => {
-                eprintln!(
-                    "[pi-memory-rust] embedding 模型未就绪（{}），首次 embed 时尝试下载",
-                    model_dir.display()
-                );
-                None
-            }
-        };
         Self {
-            embedder,
-            index: VectorIndex::new(crate::vector_index::DEFAULT_DIM, None).expect("创建向量索引失败"),
-            id_to_memory: HashMap::new(),
-            memory_to_id: HashMap::new(),
-            content_map: HashMap::new(),
-            model_dir,
+            inner: Arc::new(Mutex::new(None)),
+            model_dir: default_model_dir(),
         }
     }
 
-    /// 是否可用（模型已加载）。
-    pub fn enabled(&self) -> bool {
-        self.embedder.is_some()
+    /// 模型目录是否完整。
+    pub fn model_ready(&self) -> bool {
+        crate::model_download::model_dir_complete(&self.model_dir)
     }
 
-    /// 状态描述（诊断用）。
-    pub fn status(&self) -> String {
-        if self.enabled() {
-            "on".into()
-        } else if self.model_dir.join("model.onnx").exists() {
-            "model-error".into()
-        } else {
-            "off (模型未就绪)".into()
-        }
-    }
-
-    /// 确保模型就绪：仅当模型文件已完整时才尝试加载（不触发下载）。
-    /// 下载由启动后台线程或 /memory prepare-model 命令负责。
-    pub fn ensure_ready(&mut self) -> bool {
-        if self.enabled() {
+    /// 确保已加载（仅模型文件完整时尝试；下载由启动线程/命令负责）。
+    pub fn ensure_loaded(&self) -> bool {
+        let mut guard = self.inner.lock().expect("锁中毒");
+        if guard.is_some() {
             return true;
         }
         if !crate::model_download::model_dir_complete(&self.model_dir) {
-            return false; // 未就绪，不阻塞
+            return false;
         }
         match Embedder::load(&self.model_dir) {
             Ok(e) => {
-                self.embedder = Some(e);
+                *guard = Some(e);
                 true
             }
             Err(e) => {
@@ -103,24 +64,67 @@ impl EmbeddingRuntime {
         }
     }
 
-    /// 模型目录是否完整（诊断用）。
-    pub fn model_ready(&self) -> bool {
-        crate::model_download::model_dir_complete(&self.model_dir)
+    /// 状态描述（诊断用）。
+    pub fn status(&self) -> String {
+        if self.inner.lock().expect("锁中毒").is_some() {
+            "on".into()
+        } else if self.model_ready() {
+            "model-error".into()
+        } else {
+            "off (模型未就绪)".into()
+        }
+    }
+
+    /// 编码一批文本（模型未就绪返回 None）。
+    pub fn embed(&self, texts: &[String]) -> Option<Vec<Vec<f32>>> {
+        let mut guard = self.inner.lock().expect("锁中毒");
+        let embedder = guard.as_mut()?;
+        embedder.embed(texts).ok()
+    }
+}
+
+/// embedding 候选（对应 TS 版 buildEmbeddingCandidates 的返回元素）。
+#[derive(Debug, Clone)]
+pub struct EmbeddingCandidate {
+    pub memory_kind: MemoryKind,
+    pub memory_id: String,
+    pub content: String,
+    pub score: f64,
+}
+
+/// 项目级向量运行时：独立的 VectorIndex + id 映射（多库隔离）。
+pub struct ProjectVectors {
+    index: VectorIndex,
+    /// vector_id → (memory_kind, memory_id)
+    id_to_memory: HashMap<u64, (MemoryKind, String)>,
+    /// (kind, memory_id) → vector_id
+    memory_to_id: HashMap<(MemoryKind, String), u64>,
+    /// (kind, memory_id) → content（召回注入用）
+    content_map: HashMap<(MemoryKind, String), String>,
+}
+
+impl ProjectVectors {
+    pub fn new() -> anyhow::Result<Self> {
+        Ok(Self {
+            index: VectorIndex::new(crate::vector_index::DEFAULT_DIM, None)?,
+            id_to_memory: HashMap::new(),
+            memory_to_id: HashMap::new(),
+            content_map: HashMap::new(),
+        })
     }
 
     /// retain 路径：embed 文本并入库 + 入索引。
     pub fn save_embedding(
         &mut self,
         storage: &TursoStorage,
+        shared: &SharedEmbedder,
         memory_kind: MemoryKind,
         memory_id: &str,
         text: &str,
     ) -> anyhow::Result<()> {
-        if !self.ensure_ready() {
-            return Ok(());
-        }
-        let embedder = self.embedder.as_mut().expect("ensure_ready 已保证");
-        let embeddings = embedder.embed(&[text.to_string()])?;
+        let Some(embeddings) = shared.embed(&[text.to_string()]) else {
+            return Ok(()); // 模型未就绪：降级
+        };
         let embedding = embeddings.into_iter().next().unwrap_or_default();
         storage.save_embedding(&MemoryEmbeddingRecord {
             memory_kind,
@@ -143,22 +147,20 @@ impl EmbeddingRuntime {
         Ok(())
     }
 
-    /// recall 路径：FTS 候选 memory_id 集合 → allowlist 精排 → 候选。
+    /// recall 路径：FTS 候选 → allowlist → 精排 → 候选。
     pub fn build_embedding_candidates(
-        &mut self,
+        &self,
+        shared: &SharedEmbedder,
         prompt: &str,
         fts_candidate_memories: &[(MemoryKind, String)],
     ) -> anyhow::Result<Vec<EmbeddingCandidate>> {
-        if !self.ensure_ready() {
+        let Some(query) = shared.embed(&[prompt.to_string()]).and_then(|v| v.into_iter().next()) else {
             return Ok(Vec::new());
-        }
-        let embedder = self.embedder.as_mut().expect("ensure_ready 已保证");
-        let query = embedder.embed(&[prompt.to_string()])?.into_iter().next().unwrap_or_default();
+        };
         if query.is_empty() {
             return Ok(Vec::new());
         }
 
-        // allowlist：只在 FTS 候选且有向量的记忆里精排
         let allowlist: Vec<u64> = fts_candidate_memories
             .iter()
             .filter_map(|(kind, id)| self.memory_to_id.get(&(*kind, id.clone())).copied())
@@ -185,13 +187,4 @@ impl EmbeddingRuntime {
         }
         Ok(candidates)
     }
-}
-
-/// embedding 候选（对应 TS 版 buildEmbeddingCandidates 的返回元素）。
-#[derive(Debug, Clone)]
-pub struct EmbeddingCandidate {
-    pub memory_kind: MemoryKind,
-    pub memory_id: String,
-    pub content: String,
-    pub score: f64,
 }
