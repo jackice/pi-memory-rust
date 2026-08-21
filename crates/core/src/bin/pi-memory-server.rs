@@ -9,6 +9,7 @@ use std::io::{BufRead, Write};
 use pi_memory_core::protocol::{
     codes, methods, HelloParams, HelloResult, RpcRequest, RpcResponse, PROTOCOL_VERSION,
 };
+use pi_memory_core::embedding_runtime::EmbeddingRuntime;
 use pi_memory_core::storage::{Storage, TursoStorage};
 
 /// 单次读取一帧：`<u32 大端长度><JSON>`
@@ -40,7 +41,11 @@ fn write_frame(writer: &mut impl Write, payload: &str) -> std::io::Result<()> {
 }
 
 /// 处理单个请求，返回响应 JSON
-fn handle_request(request: &RpcRequest, turso: &mut TursoStorage) -> serde_json::Value {
+fn handle_request(
+    request: &RpcRequest,
+    turso: &mut TursoStorage,
+    embedding: &mut EmbeddingRuntime,
+) -> serde_json::Value {
     let response = match request.method.as_str() {
         methods::HELLO => {
             let params: HelloParams = match serde_json::from_value(request.params.clone()) {
@@ -72,7 +77,10 @@ fn handle_request(request: &RpcRequest, turso: &mut TursoStorage) -> serde_json:
             }
         }
         methods::DIAGNOSE => match turso.diagnose() {
-            Ok(info) => RpcResponse::ok(request.id, info),
+            Ok(mut info) => {
+                info["embedding"] = serde_json::json!(embedding.status());
+                RpcResponse::ok(request.id, info)
+            }
             Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
         },
         methods::BUILD_RECALL_INJECTION => {
@@ -82,6 +90,7 @@ fn handle_request(request: &RpcRequest, turso: &mut TursoStorage) -> serde_json:
                     &params.prompt,
                     &params.project_scope,
                     &params.session_id,
+                    embedding,
                 ) {
                     Ok(text) => RpcResponse::ok(request.id, serde_json::json!(text)),
                     Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
@@ -97,6 +106,7 @@ fn handle_request(request: &RpcRequest, turso: &mut TursoStorage) -> serde_json:
                     &params.text,
                     &params.session_id,
                     &params.project_scope,
+                    embedding,
                 ) {
                     Ok(()) => RpcResponse::ok(request.id, serde_json::json!(null)),
                     Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
@@ -120,6 +130,16 @@ fn handle_request(request: &RpcRequest, turso: &mut TursoStorage) -> serde_json:
                 Err(_) => {
                     RpcResponse::err(request.id, codes::INVALID_PARAMS, "consolidateSessionMemories 参数无效")
                 }
+            }
+        }
+        methods::PREPARE_MODEL => {
+            let model_dir = pi_memory_core::embedding_runtime::default_model_dir();
+            match pi_memory_core::model_download::ensure_model_dir(&model_dir) {
+                Ok(()) => {
+                    embedding.ensure_ready();
+                    RpcResponse::ok(request.id, serde_json::json!("模型就绪"))
+                }
+                Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
             }
         }
         methods::MEMORY_COMMAND => {
@@ -200,7 +220,18 @@ fn main() {
         }
     };
     eprintln!("[pi-memory-rust] 存储就绪: {db_path}");
-    serve(&mut storage);
+    let mut embedding = EmbeddingRuntime::new();
+    if !embedding.model_ready() {
+        // 模型未就绪：后台线程下载（不阻塞 RPC 主循环），或用户 /memory prepare-model 手动触发
+        let model_dir = pi_memory_core::embedding_runtime::default_model_dir();
+        std::thread::spawn(move || {
+            match pi_memory_core::model_download::ensure_model_dir(&model_dir) {
+                Ok(()) => eprintln!("[pi-memory-rust] 模型后台下载完成: {}", model_dir.display()),
+                Err(e) => eprintln!("[pi-memory-rust] 模型后台下载失败（可稍后 /memory prepare-model 重试）: {e}"),
+            }
+        });
+    }
+    serve(&mut storage, &mut embedding);
 }
 
 /// 解析 db 路径：`--db <path>` > 环境变量 `PI_MEMORY_DB` > 默认路径
@@ -223,7 +254,7 @@ fn parse_db_path() -> String {
     fallback.to_string_lossy().into_owned()
 }
 
-fn serve(turso: &mut TursoStorage) {
+fn serve(turso: &mut TursoStorage, embedding: &mut EmbeddingRuntime) {
     let stdin = std::io::stdin();
     let mut reader = std::io::BufReader::new(stdin.lock());
     let stdout = std::io::stdout();
@@ -247,7 +278,7 @@ fn serve(turso: &mut TursoStorage) {
             }
         };
         let shutdown = request.method == methods::SHUTDOWN;
-        let payload = handle_request(&request, turso);
+        let payload = handle_request(&request, turso, embedding);
         if let Err(e) = write_frame(&mut writer, &payload.to_string()) {
             eprintln!("[pi-memory-rust] 写入失败: {e}");
             break;

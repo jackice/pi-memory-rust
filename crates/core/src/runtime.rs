@@ -11,17 +11,19 @@ use crate::core::extraction::{
     extract_with_heuristics, ExtractStructuredMemoriesOptions, EPOCH_ISO,
 };
 use crate::core::recall::{recall_memories, RecallCandidateInput, RecallMemoriesOptions};
+use crate::embedding_runtime::EmbeddingRuntime;
 use crate::models::{MemoryKind, SessionStateRecord, WorkingMemoryRecord};
 use crate::storage::TursoStorage;
 
-/// 生成召回注入文本（对应 buildDefaultRecallInjection，embedding 路径 M2 接入）。
+/// 生成召回注入文本（对应 buildDefaultRecallInjection）。
+/// embedding 提供语义精排（allowlist 限定在 FTS 候选内）。
 pub fn build_recall_injection(
     storage: &TursoStorage,
     prompt: &str,
     project_scope: &str,
     session_id: &str,
+    embedding: &mut EmbeddingRuntime,
 ) -> anyhow::Result<String> {
-    // M2 embedding 路径会用到这两个列表（buildEmbeddingCandidates 输入），先保留
     let _working = storage.list_working_by_project(project_scope)?;
     let _episodic = storage.list_episodic_by_project(project_scope)?;
 
@@ -29,17 +31,39 @@ pub fn build_recall_injection(
 
     let safe_fts_query = to_safe_fts_query(prompt);
     let mut fts_candidates = Vec::new();
+    let mut fts_memories: Vec<(MemoryKind, String)> = Vec::new();
     let working_hits = storage.search_working_fts(&safe_fts_query, project_scope)?;
+    for (memory, _score) in &working_hits {
+        fts_memories.push((MemoryKind::Working, memory.id.clone()));
+    }
     fts_candidates.extend(rank_fts_candidates(&working_hits, MemoryKind::Working));
     let episodic_hits = storage.search_episodic_fts(&safe_fts_query, project_scope)?;
+    for (memory, _score) in &episodic_hits {
+        fts_memories.push((MemoryKind::Episodic, memory.id.clone()));
+    }
     fts_candidates.extend(rank_episodic_candidates(&episodic_hits, MemoryKind::Episodic));
 
-    // 保持 TS 版顺序：fts → embedding（M2）→ structured
+    // embedding 精排：allowlist = FTS 候选（SIMD 内核内过滤，取代 TS 版全扫描）
+    let embedding_candidates = embedding
+        .build_embedding_candidates(prompt, &fts_memories)?
+        .into_iter()
+        .map(|c| RecallCandidateInput {
+            memory_id: c.memory_id,
+            memory_kind: c.memory_kind,
+            project_scope: project_scope.to_string(),
+            content: String::new(), // content 由合并阶段从其他候选补齐
+            fts_score: None,
+            embedding_score: Some(c.score),
+            structured_score: None,
+        })
+        .collect::<Vec<_>>();
+
+    // 保持 TS 版顺序：fts → embedding → structured
     let results = recall_memories(RecallMemoriesOptions {
         project_scope,
         limit: 6,
         fts_candidates: &fts_candidates,
-        embedding_candidates: &[],
+        embedding_candidates: &embedding_candidates,
         structured_candidates: &structured,
     });
 
@@ -61,13 +85,14 @@ pub fn build_recall_injection(
     Ok(rendered)
 }
 
-/// 节奏 retain（对应 retainDefaultTurnMemories 的规则路径）。
+/// 节奏 retain（对应 retainDefaultTurnMemories）。embedding 可用时写入向量。
 pub fn retain_turn_memories(
     storage: &TursoStorage,
     turn_index: i64,
     text: &str,
     session_id: &str,
     project_scope: &str,
+    embedding: &mut EmbeddingRuntime,
 ) -> anyhow::Result<()> {
     let current = storage.get_session_state(session_id)?;
     if current.as_ref().map(|s| s.last_retained_user_turn).unwrap_or(0) >= turn_index {
@@ -95,7 +120,7 @@ pub fn retain_turn_memories(
 
     // 结构化提取（规则路径）并落库
     let structured = extract_with_heuristics(&ExtractStructuredMemoriesOptions {
-        retained_turn_id: memory_id,
+        retained_turn_id: memory_id.clone(),
         session_id: session_id.to_string(),
         text: text.to_string(),
     });
@@ -110,6 +135,9 @@ pub fn retain_turn_memories(
         last_retained_user_turn: turn_index,
         has_recalled_for_first_turn: current.as_ref().map(|s| s.has_recalled_for_first_turn).unwrap_or(false),
     })?;
+
+    // embedding 入库（失败不阻塞 retain 主流程）
+    let _ = embedding.save_embedding(storage, MemoryKind::Working, &memory_id, text);
     Ok(())
 }
 

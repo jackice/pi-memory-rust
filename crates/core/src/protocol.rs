@@ -53,6 +53,8 @@ pub mod methods {
     pub const CONSOLIDATE_SESSION_MEMORIES: &str = "consolidateSessionMemories";
     /// /memory 命令。params: { sub, target, projectScope, sessionId }
     pub const MEMORY_COMMAND: &str = "memoryCommand";
+    /// 手动触发模型下载。params: {}
+    pub const PREPARE_MODEL: &str = "prepareModel";
 }
 
 /// hello 请求参数
