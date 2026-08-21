@@ -107,6 +107,12 @@ export class MemoryRustClient {
   private startProcess(): void {
     this.restartCount = 0;
     // 数据库路径由 Rust 侧按 projectScope 管理（单进程多库，物理隔离）
+    if (!fs.existsSync(this.options.binaryPath)) {
+      throw new Error(
+        `pi-memory-server 二进制不存在: ${this.options.binaryPath}\n` +
+          `请安装 leaf 包（@jackice/pi-memory-rust-${process.platform}-${process.arch}）或设置 PI_MEMORY_RUST_BINARY`,
+      );
+    }
     const proc = spawn(this.options.binaryPath, [], { stdio: ["pipe", "pipe", "pipe"] });
     this.proc = proc;
     proc.stdout.on("data", (chunk: Buffer) => this.onData(chunk));
