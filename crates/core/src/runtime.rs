@@ -100,12 +100,13 @@ pub fn retain_turn_memories(
     llm_result: Option<&str>,
 ) -> anyhow::Result<()> {
     let current = storage.get_session_state(session_id)?;
-    if current.as_ref().map(|s| s.last_retained_user_turn).unwrap_or(0) >= turn_index {
+    let memory_id = format!("{session_id}:turn:{turn_index}");
+    // 幂等：以数据存在性为准（turnIndex 可能从 0 开始，state 默认值 0 会误跳过首个 turn）
+    if storage.get_working(&memory_id)?.is_some() {
         return Ok(());
     }
 
     let timestamp = now_iso();
-    let memory_id = format!("{session_id}:turn:{turn_index}");
     storage.insert_working(&WorkingMemoryRecord {
         id: memory_id.clone(),
         content: text.to_string(),
@@ -303,6 +304,7 @@ pub fn memory_command(
     target: &str,
     project_scope: &str,
     session_id: &str,
+    embedding_status: &str,
 ) -> anyhow::Result<String> {
     match sub {
         "view" => {
@@ -333,7 +335,7 @@ pub fn memory_command(
             let state = storage.get_session_state(session_id)?;
             let recalled = state.map(|s| s.has_recalled_for_first_turn).unwrap_or(false);
             Ok(format!(
-                "diagnose: db={db_path} embedding=off llm=off recalled={}",
+                "diagnose: db={db_path} embedding={embedding_status} llm=off recalled={}",
                 if recalled { "yes" } else { "no" }
             ))
         }

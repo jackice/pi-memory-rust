@@ -243,6 +243,7 @@ fn handle_request(request: &RpcRequest, pool: &mut StoragePool, shared: &SharedE
                         &params.target,
                         &params.project_scope,
                         &params.session_id,
+                        &shared.status(),
                     ) {
                         Ok(text) => RpcResponse::ok(request.id, serde_json::json!(text)),
                         Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
