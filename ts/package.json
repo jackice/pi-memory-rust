@@ -1,6 +1,6 @@
 {
   "name": "@jackice/pi-memory-rust",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Rust 重写版 pi-memory：Turso 存储 + Tantivy FTS + turbovec 向量 + 本地 ONNX embedding",
   "author": "jackice",
   "license": "MIT",
@@ -40,10 +40,10 @@
     "typescript": "^5.9.3"
   },
   "optionalDependencies": {
-    "@jackice/pi-memory-rust-darwin-arm64": "=0.1.0",
-    "@jackice/pi-memory-rust-darwin-x64": "=0.1.0",
-    "@jackice/pi-memory-rust-linux-x64": "=0.1.0",
-    "@jackice/pi-memory-rust-win32-x64": "=0.1.0"
+    "@jackice/pi-memory-rust-darwin-arm64": "=0.1.1",
+    "@jackice/pi-memory-rust-darwin-x64": "=0.1.1",
+    "@jackice/pi-memory-rust-linux-x64": "=0.1.1",
+    "@jackice/pi-memory-rust-win32-x64": "=0.1.1"
   },
   "main": "./index.ts"
 }
