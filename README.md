@@ -71,3 +71,23 @@ bun test ts/test/
 ## Model
 
 all-MiniLM-L6-v2 (384-dim, ~90MB ONNX): auto-downloaded in the background on first start (HF official + hf-mirror fallback); degrades to FTS-only when missing. Manual trigger: `/memory prepare-model`.
+
+## Benchmark
+
+Run: `cargo run --release -p pi-memory-core --bin pi-memory-bench` (10k memories, 100 queries; local-only, zero LLM API cost).
+
+### Results (10,000 memories, macOS arm64)
+
+| Metric | Value |
+|---|---|
+| **Recall injection (avg)** | **19.2 ms** |
+| Recall P50 | 19.2 ms |
+| Recall P95 | 20.5 ms |
+| Recall max | 22.0 ms |
+| Single-turn retain (real path) | 6.8 ms |
+| Bulk fill throughput | 4.8 ms/item (48s for 10k) |
+| Database file size | 82.6 MB |
+
+Acceptance target: recall injection ≤ 300ms at 10k memories — **achieved with ~15× headroom**.
+
+Bulk-fill breakdown: embedding 47.4s (ONNX batch inference) | DB write 0.2s | vector index 0.3s | FTS rebuild 0.0s. The Tantivy FTS index is dropped during bulk fill and rebuilt once at the end (avoids per-row commit overhead); the real single-turn retain path runs with the index active at 6.8ms/item.

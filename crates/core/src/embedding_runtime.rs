@@ -131,6 +131,18 @@ impl ProjectVectors {
             return Ok(()); // 模型未就绪：降级
         };
         let embedding = embeddings.into_iter().next().unwrap_or_default();
+        self.save_embedding_vector(storage, memory_kind, memory_id, text, embedding)
+    }
+
+    /// 预计算向量入库 + 入索引（基准/批量填充用，避免逐条推理）。
+    pub fn save_embedding_vector(
+        &mut self,
+        storage: &TursoStorage,
+        memory_kind: MemoryKind,
+        memory_id: &str,
+        text: &str,
+        embedding: Vec<f32>,
+    ) -> anyhow::Result<()> {
         storage.save_embedding(&MemoryEmbeddingRecord {
             memory_kind,
             memory_id: memory_id.to_string(),
@@ -149,6 +161,35 @@ impl ProjectVectors {
         let vector_id = ids[0];
         self.id_to_memory.insert(vector_id, key.clone());
         self.memory_to_id.insert(key, vector_id);
+        Ok(())
+    }
+
+    /// 批量向量入库 + 批量索引 add（bench/历史导入用，避免逐条 add 开销）。
+    /// 返回 (memory_id → vector_id) 由调用方决定是否记录；本方法内部维护映射。
+    pub fn save_embeddings_batch(
+        &mut self,
+        storage: &TursoStorage,
+        items: &[(MemoryKind, String, String)], // (kind, memory_id, text)
+        embeddings: &[Vec<f32>],
+    ) -> anyhow::Result<()> {
+        debug_assert_eq!(items.len(), embeddings.len());
+        // 1) 向量落库
+        for (item, embedding) in items.iter().zip(embeddings.iter()) {
+            storage.save_embedding(&MemoryEmbeddingRecord {
+                memory_kind: item.0,
+                memory_id: item.1.clone(),
+                embedding: embedding.iter().map(|&v| v as f64).collect(),
+                model: "all-MiniLM-L6-v2".into(),
+            })?;
+        }
+        // 2) 批量索引 add
+        let ids = self.index.add(embeddings)?;
+        for ((item, id), embedding) in items.iter().zip(ids.iter()).zip(embeddings.iter()) {
+            let key = (item.0, item.1.clone());
+            self.content_map.insert(key.clone(), item.2.clone());
+            self.id_to_memory.insert(*id, key.clone());
+            self.memory_to_id.insert(key, *id);
+        }
         Ok(())
     }
 

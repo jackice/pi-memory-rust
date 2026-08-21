@@ -195,6 +195,18 @@ impl TursoStorage {
         collect_first_row(&mut stmt, working_from_row)
     }
 
+    /// 开启事务（批量写入性能：Tantivy FTS 索引在 COMMIT 时一次性更新）。
+    pub fn begin_tx(&self) -> anyhow::Result<()> {
+        self.conn.execute("BEGIN")?;
+        Ok(())
+    }
+
+    /// 提交事务。
+    pub fn commit_tx(&self) -> anyhow::Result<()> {
+        self.conn.execute("COMMIT")?;
+        Ok(())
+    }
+
     /// 从旧 pi-memory SQLite 库迁移数据（M3 迁移工具）。
     /// 旧库由 turso_core 直读（SQLite 文件格式兼容）；FTS5 虚拟表忽略（新库 Tantivy 索引自动重建）。
     pub fn migrate_from(&self, source_path: &str) -> anyhow::Result<serde_json::Value> {
@@ -827,6 +839,13 @@ impl TursoStorage {
     // -----------------------------------------------------------------------
     // FTS 重建（/memory rebuild 语义）
     // -----------------------------------------------------------------------
+
+    /// 删除 FTS 索引（批量填充阶段避免逐条 commit；填充后 rebuild_fts 一次全量建索引）。
+    pub fn drop_fts(&self) -> anyhow::Result<()> {
+        self.conn.execute("DROP INDEX IF EXISTS fts_working_idx")?;
+        self.conn.execute("DROP INDEX IF EXISTS fts_episodes_idx")?;
+        Ok(())
+    }
 
     /// 重建 Tantivy FTS 索引：DROP + CREATE（幂等）。
     pub fn rebuild_fts(&self) -> anyhow::Result<()> {
