@@ -209,9 +209,14 @@ impl TursoStorage {
 
     /// 从旧 pi-memory SQLite 库迁移数据（M3 迁移工具）。
     /// 旧库由 turso_core 直读（SQLite 文件格式兼容）；FTS5 虚拟表忽略（新库 Tantivy 索引自动重建）。
+    /// 性能：迁移前 drop FTS 索引（避免逐条 commit 非线性恶化），完成后一次性重建。
     pub fn migrate_from(&self, source_path: &str) -> anyhow::Result<serde_json::Value> {
         let source = TursoStorage::open(source_path)?;
         let mut stats = serde_json::Map::new();
+
+        // 批量导入阶段：先摘除 FTS 索引（Tantivy 逐条 commit 随规模非线性恶化）
+        self.drop_fts()?;
+        self.begin_tx()?;
 
         // working_memory
         let rows = source.list_all_working()?;
@@ -249,7 +254,8 @@ impl TursoStorage {
         }
         stats.insert("embeddings".into(), serde_json::json!(embedding_count));
 
-        // 重建 FTS 索引（迁移数据后）
+        self.commit_tx()?;
+        // 重建 FTS 索引（迁移数据后一次性全量建索引）
         self.rebuild_fts()?;
 
         Ok(serde_json::Value::Object(stats))
