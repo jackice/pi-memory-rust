@@ -23,3 +23,6 @@ ts/bin/
 
 # 全局 gitignore 忽略了所有 bin/ 目录；Rust bin target 是源码，需重新包含
 !crates/core/src/bin/
+
+# pi 会话文件
+.pi/
