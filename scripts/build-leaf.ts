@@ -11,7 +11,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 const ROOT = path.join(import.meta.dir, "..");
-const VERSION = "0.1.2";
+const VERSION = "0.1.3";
 const BINARY_NAME = "pi-memory-server";
 
 const TARGETS = [
