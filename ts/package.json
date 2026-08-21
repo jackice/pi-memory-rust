@@ -15,7 +15,7 @@
   ],
   "files": [
     "index.ts",
-    "native",
+    "bin",
     "src",
     "README.md"
   ],
@@ -44,5 +44,6 @@
     "@jackice/pi-memory-rust-darwin-x64": "=0.1.0",
     "@jackice/pi-memory-rust-linux-x64": "=0.1.0",
     "@jackice/pi-memory-rust-win32-x64": "=0.1.0"
-  }
+  },
+  "main": "./index.ts"
 }
