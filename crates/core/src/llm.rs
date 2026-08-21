@@ -5,8 +5,17 @@
 
 use crate::models::{FactRecord, InstructionRecord, PreferenceRecord, TimelineEventRecord};
 
-/// 结构化提取提示（对应 extract-structured.md）。
-pub const EXTRACT_PROMPT: &str = r#"请从 retain 下来的会话片段中抽取 facts、preferences、instructions、timeline 四类结构化记忆；如果无法可靠抽取，请返回空数组，不要编造。"#;
+/// 结构化提取提示（对应 extract-structured.md，明确 JSON 输出格式）。
+pub const EXTRACT_PROMPT: &str = r#"请从下方会话片段中抽取 facts、preferences、instructions、timeline 四类结构化记忆，并**只返回 JSON**（不要任何其他文字、解释或 markdown）：
+{
+  "facts": [{"subject": "主语", "predicate": "谓语", "object": "宾语"}],
+  "preferences": [{"preference": "偏好描述", "topic": "主题"}],
+  "instructions": [{"instruction": "指令内容", "topic": "主题"}],
+  "timeline": [{"date": "YYYY-MM-DD", "description": "事件描述"}]
+}
+规则：无法可靠抽取的类别返回空数组；不要编造；只输出 JSON 本身。
+
+会话片段："#;
 
 /// 会话整合提示（对应 consolidate-session.md）。
 pub const CONSOLIDATE_PROMPT: &str = r#"请把本次 session 的 working memory 总结为 1 条可复用的 episodic memory；若信息不足，请返回简洁摘要，不要阻塞流程。"#;
