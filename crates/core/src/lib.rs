@@ -3,5 +3,6 @@
 //! 纯 Rust 实现：存储（turso_core）、规则提取/整合、混合召回。
 //! 与 TS 参考实现（pi-memory v0.1.2）保持行为等价（bit-exact 契约）。
 
+pub mod models;
 pub mod protocol;
 pub mod storage;
