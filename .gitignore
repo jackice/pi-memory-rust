@@ -20,3 +20,6 @@ ts/bin/
 
 # 系统
 .DS_Store
+
+# 全局 gitignore 忽略了所有 bin/ 目录；Rust bin target 是源码，需重新包含
+!crates/core/src/bin/
