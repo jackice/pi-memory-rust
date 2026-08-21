@@ -31,6 +31,8 @@ pub struct EmbeddingRuntime {
     id_to_memory: HashMap<u64, (MemoryKind, String)>,
     /// (kind, memory_id) → vector_id
     memory_to_id: HashMap<(MemoryKind, String), u64>,
+    /// (kind, memory_id) → content（召回注入用，避免跨进程回查）
+    content_map: HashMap<(MemoryKind, String), String>,
     model_dir: PathBuf,
 }
 
@@ -59,6 +61,7 @@ impl EmbeddingRuntime {
             index: VectorIndex::new(crate::vector_index::DEFAULT_DIM, None).expect("创建向量索引失败"),
             id_to_memory: HashMap::new(),
             memory_to_id: HashMap::new(),
+            content_map: HashMap::new(),
             model_dir,
         }
     }
@@ -127,6 +130,7 @@ impl EmbeddingRuntime {
         })?;
 
         let key = (memory_kind, memory_id.to_string());
+        self.content_map.insert(key.clone(), text.to_string());
         // 已有向量则先移除（turbovec 无 update，删除重建）
         if let Some(old_id) = self.memory_to_id.remove(&key) {
             let _ = self.index.remove(old_id);
@@ -174,6 +178,7 @@ impl EmbeddingRuntime {
                 candidates.push(EmbeddingCandidate {
                     memory_kind: *kind,
                     memory_id: memory_id.clone(),
+                    content: self.content_map.get(&(*kind, memory_id.clone())).cloned().unwrap_or_default(),
                     score: hit.score as f64,
                 });
             }
@@ -187,5 +192,6 @@ impl EmbeddingRuntime {
 pub struct EmbeddingCandidate {
     pub memory_kind: MemoryKind,
     pub memory_id: String,
+    pub content: String,
     pub score: f64,
 }

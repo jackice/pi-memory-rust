@@ -51,7 +51,7 @@ pub fn build_recall_injection(
             memory_id: c.memory_id,
             memory_kind: c.memory_kind,
             project_scope: project_scope.to_string(),
-            content: String::new(), // content 由合并阶段从其他候选补齐
+            content: c.content,
             fts_score: None,
             embedding_score: Some(c.score),
             structured_score: None,

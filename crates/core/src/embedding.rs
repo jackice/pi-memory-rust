@@ -70,16 +70,20 @@ impl Embedder {
             .iter()
             .flat_map(|e| e.get_attention_mask().iter().map(|&m| m as i64))
             .collect();
+        // all-MiniLM 需要第三个输入 token_type_ids（单段输入恒为 0）
+        let type_ids: Vec<i64> = vec![0i64; ids.len()];
 
         let batch = texts.len();
         let ids_tensor = TensorRef::from_array_view(([batch, padded_len], &ids[..]))
             .map_err(|e| anyhow::anyhow!("构造 input_ids 失败: {e}"))?;
         let mask_tensor = TensorRef::from_array_view(([batch, padded_len], &mask[..]))
             .map_err(|e| anyhow::anyhow!("构造 attention_mask 失败: {e}"))?;
+        let type_tensor = TensorRef::from_array_view(([batch, padded_len], &type_ids[..]))
+            .map_err(|e| anyhow::anyhow!("构造 token_type_ids 失败: {e}"))?;
 
         let outputs = self
             .session
-            .run(ort::inputs![ids_tensor, mask_tensor])
+            .run(ort::inputs![ids_tensor, mask_tensor, type_tensor])
             .with_context(|| "模型推理失败")?;
         // outputs[0] = last_hidden_state [batch, seq, hidden]
         let hidden_state = outputs[0]
