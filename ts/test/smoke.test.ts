@@ -9,7 +9,7 @@ test("常驻进程生命周期与 JSON-RPC 链路", async () => {
 
   // diagnose
   const diag = await client.diagnose();
-  expect(diag.backend).toBe("mem");
+  expect(diag.backend).toBe("turso");
 
   // 未知方法应抛错
   await expect(client.call("nope")).rejects.toThrow();
