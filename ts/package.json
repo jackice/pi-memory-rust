@@ -40,10 +40,10 @@
     "typescript": "^5.9.3"
   },
   "optionalDependencies": {
-    "@jackice/pi-memory-rust-darwin-arm64": "=0.1.9",
-    "@jackice/pi-memory-rust-darwin-x64": "=0.1.9",
-    "@jackice/pi-memory-rust-linux-x64": "=0.1.9",
-    "@jackice/pi-memory-rust-win32-x64": "=0.1.9"
+    "@jackice/pi-memory-rust-darwin-arm64": "=0.1.10",
+    "@jackice/pi-memory-rust-darwin-x64": "=0.1.10",
+    "@jackice/pi-memory-rust-linux-x64": "=0.1.10",
+    "@jackice/pi-memory-rust-win32-x64": "=0.1.10"
   },
   "main": "./index.ts"
 }
