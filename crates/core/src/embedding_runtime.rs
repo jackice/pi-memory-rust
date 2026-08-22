@@ -283,6 +283,10 @@ impl ProjectVectors {
         text: &str,
         embedding: Vec<f32>,
     ) -> anyhow::Result<()> {
+        // Defensive: a degenerate/empty embedding would corrupt the index (dim 0); skip it
+        if embedding.is_empty() {
+            return Ok(());
+        }
         storage.save_embedding(&MemoryEmbeddingRecord {
             memory_kind,
             memory_id: memory_id.to_string(),

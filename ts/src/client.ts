@@ -20,6 +20,9 @@ export const PROTOCOL_VERSION = 1;
 /** Default per-call timeout (ms); aligns with the TS embedding 100ms degradation target */
 export const DEFAULT_CALL_TIMEOUT_MS = 2000;
 
+/** Max accepted frame size; mirrors the Rust read_frame cap (16 MiB) */
+const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+
 export interface RpcError {
   code: number;
   message: string;
@@ -67,12 +70,16 @@ export class MemoryRustClient {
 
   /** Ensure the resident process is up and the version handshake completed */
   async ensureStarted(): Promise<void> {
+    // Never auto-restart after a deliberate shutdown (avoids leaking orphan processes
+    // when late async callbacks arrive after session teardown)
+    if (this.shuttingDown) {
+      throw new Error("pi-memory-rust client is shutting down");
+    }
     if (this.proc && this.proc.exitCode === null) return;
     if (this.startPromise) {
       await this.startPromise;
       return;
     }
-    this.shuttingDown = false;
     this.startingUp = true;
     this.startPromise = (async () => {
       try {
@@ -157,6 +164,20 @@ export class MemoryRustClient {
     }
     const proc = spawn(this.options.binaryPath, [], { stdio: ["pipe", "pipe", "pipe"] });
     this.proc = proc;
+    // Swallow pipe errors (EPIPE etc.): a process can exit right after we write a frame,
+    // and an unhandled 'error' event on stdin would throw inside the host
+    proc.stdin.on("error", () => {});
+    proc.on("error", (error) => {
+      // Spawn failure (e.g. the binary was removed between the existsSync check and spawn):
+      // fail pending requests and do not auto-restart (retrying a broken binary is pointless)
+      this.options.log(`process error: ${error.message}`);
+      for (const [, entry] of this.pending) {
+        clearTimeout(entry.timer);
+        entry.reject(new Error(`process error: ${error.message}`));
+      }
+      this.pending.clear();
+      this.proc = null;
+    });
     proc.stdout.on("data", (chunk: Buffer) => this.onData(chunk));
     proc.stderr.on("data", (chunk: Buffer) => {
       this.options.log(chunk.toString().trimEnd());
@@ -189,6 +210,17 @@ export class MemoryRustClient {
     // Parse complete frames
     while (this.buffer.length >= 4) {
       const len = this.buffer.readUInt32BE(0);
+      if (len > MAX_FRAME_BYTES) {
+        // A malformed oversized frame means the wire protocol is broken;
+        // drop the buffer and treat the process as crashed so it restarts
+        this.options.log(`oversized frame (${len} bytes) — resetting process`);
+        this.buffer = Buffer.alloc(0);
+        const proc = this.proc;
+        if (proc && proc.exitCode === null) {
+          proc.kill("SIGKILL");
+        }
+        return;
+      }
       if (this.buffer.length < 4 + len) break;
       const payload = this.buffer.subarray(4, 4 + len).toString("utf8");
       this.buffer = this.buffer.subarray(4 + len);

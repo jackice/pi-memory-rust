@@ -242,6 +242,12 @@ impl TursoStorage {
         Ok(())
     }
 
+    /// Roll back the current transaction (used when a bulk operation fails midway).
+    pub fn rollback_tx(&self) -> anyhow::Result<()> {
+        self.conn.execute("ROLLBACK")?;
+        Ok(())
+    }
+
     /// Migrate data from a legacy pi-memory SQLite database (M3 migration tool).
     /// The legacy DB is read directly by turso_core (SQLite file compatible); FTS5 virtual tables are ignored (the new Tantivy index rebuilds automatically).
     /// Performance: drop the FTS index before migrating (per-row commits degrade nonlinearly), then rebuild once at the end.
@@ -253,42 +259,51 @@ impl TursoStorage {
         self.drop_fts()?;
         self.begin_tx()?;
 
-        // working_memory
-        let rows = source.list_all_working()?;
-        for row in rows {
-            self.insert_working(&row)?;
+        let result = (|| -> anyhow::Result<()> {
+            // working_memory
+            let rows = source.list_all_working()?;
+            for row in rows {
+                self.insert_working(&row)?;
+            }
+            stats.insert("working".into(), serde_json::json!(self.count_working()?));
+
+            // episodic_memory
+            let rows = source.list_all_episodic()?;
+            for row in rows {
+                self.insert_episodic(&row)?;
+            }
+            stats.insert("episodic".into(), serde_json::json!(self.count_episodic()?));
+
+            // facts / preferences / instructions / timeline
+            let facts = source.list_all_facts()?;
+            self.insert_facts(&facts)?;
+            stats.insert("facts".into(), serde_json::json!(facts.len()));
+            let preferences = source.list_all_preferences()?;
+            self.insert_preferences(&preferences)?;
+            stats.insert("preferences".into(), serde_json::json!(preferences.len()));
+            let instructions = source.list_all_instructions()?;
+            self.insert_instructions(&instructions)?;
+            stats.insert("instructions".into(), serde_json::json!(instructions.len()));
+            let timeline = source.list_all_timeline()?;
+            self.insert_timeline_events(&timeline)?;
+            stats.insert("timeline".into(), serde_json::json!(timeline.len()));
+
+            // embeddings (vectors migrate directly; model metadata preserved)
+            let embeddings = source.list_all_embeddings()?;
+            let embedding_count = embeddings.len();
+            for embedding in &embeddings {
+                self.save_embedding(embedding)?;
+            }
+            stats.insert("embeddings".into(), serde_json::json!(embedding_count));
+            Ok(())
+        })();
+
+        if let Err(e) = result {
+            // Restore consistency on failure: roll back the partial import and rebuild the FTS index
+            let _ = self.rollback_tx();
+            let _ = self.rebuild_fts();
+            return Err(e);
         }
-        stats.insert("working".into(), serde_json::json!(self.count_working()?));
-
-        // episodic_memory
-        let rows = source.list_all_episodic()?;
-        for row in rows {
-            self.insert_episodic(&row)?;
-        }
-        stats.insert("episodic".into(), serde_json::json!(self.count_episodic()?));
-
-        // facts / preferences / instructions / timeline
-        let facts = source.list_all_facts()?;
-        self.insert_facts(&facts)?;
-        stats.insert("facts".into(), serde_json::json!(facts.len()));
-        let preferences = source.list_all_preferences()?;
-        self.insert_preferences(&preferences)?;
-        stats.insert("preferences".into(), serde_json::json!(preferences.len()));
-        let instructions = source.list_all_instructions()?;
-        self.insert_instructions(&instructions)?;
-        stats.insert("instructions".into(), serde_json::json!(instructions.len()));
-        let timeline = source.list_all_timeline()?;
-        self.insert_timeline_events(&timeline)?;
-        stats.insert("timeline".into(), serde_json::json!(timeline.len()));
-
-        // embeddings (vectors migrate directly; model metadata preserved)
-        let embeddings = source.list_all_embeddings()?;
-        let embedding_count = embeddings.len();
-        for embedding in &embeddings {
-            self.save_embedding(embedding)?;
-        }
-        stats.insert("embeddings".into(), serde_json::json!(embedding_count));
-
         self.commit_tx()?;
         // Rebuild the FTS index (one full build after migration)
         self.rebuild_fts()?;
