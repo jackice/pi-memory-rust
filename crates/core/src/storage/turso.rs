@@ -6,7 +6,7 @@
 //! the update sync behavior is covered by `tests/turso_storage.rs::turso_fts_update_sync`).
 
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use turso_core::types::{Text, Value};
 use turso_core::{Connection, Database, DatabaseOpts, Numeric, OpenFlags, Row, Statement};
@@ -115,6 +115,9 @@ CREATE TABLE IF NOT EXISTS session_state (
 pub struct TursoStorage {
     conn: Arc<Connection>,
     path: String,
+    /// 缓存 prepare 的查询语句（单线程 RPC 主循环访问；Mutex 兜底并发测试）。
+    /// 复用前必须 reset + clear_bindings，避免绑定残留。
+    stmts: Mutex<std::collections::HashMap<String, Statement>>,
 }
 
 impl TursoStorage {
@@ -142,8 +145,7 @@ impl TursoStorage {
         Err(last_err.expect("loop always runs at least once"))
     }
 
-    fn open_once(path: &str) -> anyhow::Result<Self> {
-        let io = Database::io_for_path(path)?;
+    fn open_once(path: &str) -> anyhow::Result<Self> {        let io = Database::io_for_path(path)?;
         // The Tantivy FTS index (USING fts) is an experimental index method and must be enabled explicitly.
         // libSQL's experimental multiprocess WAL (which lifts the exclusive file lock so multiple pi
         // sessions can share one project DB) is OFF by default: it can panic on large transactions
@@ -155,7 +157,11 @@ impl TursoStorage {
             .with_multiprocess_wal(enable_multiprocess_wal);
         let db = Database::open_file_with_flags(io, path, OpenFlags::default(), opts, None)?;
         let conn = db.connect()?;
-        let storage = Self { conn, path: path.to_string() };
+        let storage = Self {
+            conn,
+            path: path.to_string(),
+            stmts: Mutex::new(std::collections::HashMap::new()),
+        };
         storage.init()?;
         // Multi-session resilience: a busy_timeout turns cross-process write contention into a bounded
         // wait instead of an immediate error, so concurrent pi sessions rarely fail on retain
@@ -465,13 +471,30 @@ impl TursoStorage {
         collect_rows(&mut stmt, working_from_row)
     }
 
+    /// Run a cached prepared statement: prepare once, then reset + clear bindings before
+    /// each execution (avoids leftover bindings). SQL must be a static literal to hit the cache.
+    fn with_cached_stmt<T>(
+        &self,
+        sql: &str,
+        run: impl FnOnce(&mut Statement) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let mut cache = self.stmts.lock().expect("mutex poisoned");
+        if !cache.contains_key(sql) {
+            cache.insert(sql.to_string(), self.conn.prepare(sql)?);
+        }
+        let stmt = cache.get_mut(sql).expect("just inserted");
+        stmt.reset()?;
+        stmt.clear_bindings();
+        run(stmt)
+    }
+
     /// Tantivy FTS search over working memories (matches the TS searchWorkingMemory: MATCH + scope filter + score sort).
     pub fn search_working_fts(
         &self,
         query: &str,
         project_scope: &str,
     ) -> anyhow::Result<Vec<(WorkingMemoryRecord, f64)>> {
-        let mut stmt = self.conn.prepare(
+        self.with_cached_stmt(
             "SELECT id, content, embed_text, source, session_id, project_scope,
                     importance, memory_type, metadata_json, created_at, updated_at,
                     consolidated_at, valid_until, superseded_by,
@@ -479,10 +502,12 @@ impl TursoStorage {
              FROM working_memory
              WHERE fts_match(content, ?1) AND project_scope = ?2
              ORDER BY score DESC",
-        )?;
-        bind_text(&mut stmt, 1, query)?;
-        bind_text(&mut stmt, 2, project_scope)?;
-        collect_rows_with_score(&mut stmt, working_from_row)
+            |stmt| {
+                bind_text(stmt, 1, query)?;
+                bind_text(stmt, 2, project_scope)?;
+                collect_rows_with_score(stmt, working_from_row)
+            },
+        )
     }
 
     /// Count working_memory rows.
@@ -552,7 +577,7 @@ impl TursoStorage {
         query: &str,
         project_scope: &str,
     ) -> anyhow::Result<Vec<(EpisodicMemoryRecord, f64)>> {
-        let mut stmt = self.conn.prepare(
+        self.with_cached_stmt(
             "SELECT id, content, summary_of, session_id, project_scope,
                     importance, tier, metadata_json, memory_type,
                     created_at, updated_at, degraded_at, valid_until, superseded_by,
@@ -560,10 +585,12 @@ impl TursoStorage {
              FROM episodic_memory
              WHERE fts_match(content, ?1) AND project_scope = ?2
              ORDER BY score DESC",
-        )?;
-        bind_text(&mut stmt, 1, query)?;
-        bind_text(&mut stmt, 2, project_scope)?;
-        collect_rows_with_score(&mut stmt, episodic_from_row)
+            |stmt| {
+                bind_text(stmt, 1, query)?;
+                bind_text(stmt, 2, project_scope)?;
+                collect_rows_with_score(stmt, episodic_from_row)
+            },
+        )
     }
 
     /// Count episodic_memory rows.
@@ -701,93 +728,101 @@ impl TursoStorage {
     /// LIKE search over structured tables (matches queryStructuredCandidates).
     /// project_scope filter: empty/legacy-unmarked rows stay visible for compatibility (isolation applies to newly written data).
     pub fn search_facts_like(&self, query: &str, project_scope: &str) -> anyhow::Result<Vec<FactRecord>> {
-        let mut stmt = self.conn.prepare(
+        self.with_cached_stmt(
             "SELECT fact_id, subject, predicate, object, confidence, source_memory_id, session_id, project_scope, timestamp
              FROM facts WHERE (subject LIKE ?1 OR predicate LIKE ?1 OR object LIKE ?1)
                AND (project_scope = ?2 OR project_scope = '' OR project_scope IS NULL)",
-        )?;
-        bind_text(&mut stmt, 1, &format!("%{query}%"))?;
-        bind_text(&mut stmt, 2, project_scope)?;
-        collect_rows(&mut stmt, |row| {
-            Ok(FactRecord {
-                fact_id: row_to_string(row, 0)?,
-                subject: row_to_string(row, 1)?,
-                predicate: row_to_string(row, 2)?,
-                object: row_to_string(row, 3)?,
-                confidence: row_to_f64(row, 4)?,
-                source_memory_id: row_to_opt_string(row, 5)?,
-                session_id: row_to_string(row, 6)?,
-                project_scope: row_to_string(row, 7)?,
-                timestamp: row_to_string(row, 8)?,
-            })
-        })
+            |stmt| {
+                bind_text(stmt, 1, &format!("%{query}%"))?;
+                bind_text(stmt, 2, project_scope)?;
+                collect_rows(stmt, |row| {
+                    Ok(FactRecord {
+                        fact_id: row_to_string(row, 0)?,
+                        subject: row_to_string(row, 1)?,
+                        predicate: row_to_string(row, 2)?,
+                        object: row_to_string(row, 3)?,
+                        confidence: row_to_f64(row, 4)?,
+                        source_memory_id: row_to_opt_string(row, 5)?,
+                        session_id: row_to_string(row, 6)?,
+                        project_scope: row_to_string(row, 7)?,
+                        timestamp: row_to_string(row, 8)?,
+                    })
+                })
+            },
+        )
     }
 
     pub fn search_instructions_like(&self, query: &str, project_scope: &str) -> anyhow::Result<Vec<InstructionRecord>> {
-        let mut stmt = self.conn.prepare(
+        self.with_cached_stmt(
             "SELECT id, instruction, topic, active, context_snippet, source_memory_id, session_id, project_scope, created_at
              FROM instructions WHERE instruction LIKE ?1
                AND (project_scope = ?2 OR project_scope = '' OR project_scope IS NULL)",
-        )?;
-        bind_text(&mut stmt, 1, &format!("%{query}%"))?;
-        bind_text(&mut stmt, 2, project_scope)?;
-        collect_rows(&mut stmt, |row| {
-            Ok(InstructionRecord {
-                id: row_to_string(row, 0)?,
-                instruction: row_to_string(row, 1)?,
-                topic: row_to_opt_string(row, 2)?,
-                active: row_to_i64(row, 3) != 0,
-                context_snippet: row_to_opt_string(row, 4)?,
-                source_memory_id: row_to_opt_string(row, 5)?,
-                session_id: row_to_string(row, 6)?,
-                project_scope: row_to_string(row, 7)?,
-                created_at: row_to_string(row, 8)?,
-            })
-        })
+            |stmt| {
+                bind_text(stmt, 1, &format!("%{query}%"))?;
+                bind_text(stmt, 2, project_scope)?;
+                collect_rows(stmt, |row| {
+                    Ok(InstructionRecord {
+                        id: row_to_string(row, 0)?,
+                        instruction: row_to_string(row, 1)?,
+                        topic: row_to_opt_string(row, 2)?,
+                        active: row_to_i64(row, 3) != 0,
+                        context_snippet: row_to_opt_string(row, 4)?,
+                        source_memory_id: row_to_opt_string(row, 5)?,
+                        session_id: row_to_string(row, 6)?,
+                        project_scope: row_to_string(row, 7)?,
+                        created_at: row_to_string(row, 8)?,
+                    })
+                })
+            },
+        )
     }
 
     pub fn search_preferences_like(&self, query: &str, project_scope: &str) -> anyhow::Result<Vec<PreferenceRecord>> {
-        let mut stmt = self.conn.prepare(
+        self.with_cached_stmt(
             "SELECT id, preference, topic, context_snippet, source_memory_id, session_id, project_scope, created_at
              FROM preferences WHERE preference LIKE ?1
                AND (project_scope = ?2 OR project_scope = '' OR project_scope IS NULL)",
-        )?;
-        bind_text(&mut stmt, 1, &format!("%{query}%"))?;
-        bind_text(&mut stmt, 2, project_scope)?;
-        collect_rows(&mut stmt, |row| {
-            Ok(PreferenceRecord {
-                id: row_to_string(row, 0)?,
-                preference: row_to_string(row, 1)?,
-                topic: row_to_opt_string(row, 2)?,
-                context_snippet: row_to_opt_string(row, 3)?,
-                source_memory_id: row_to_opt_string(row, 4)?,
-                session_id: row_to_string(row, 5)?,
-                project_scope: row_to_string(row, 6)?,
-                created_at: row_to_string(row, 7)?,
-            })
-        })
+            |stmt| {
+                bind_text(stmt, 1, &format!("%{query}%"))?;
+                bind_text(stmt, 2, project_scope)?;
+                collect_rows(stmt, |row| {
+                    Ok(PreferenceRecord {
+                        id: row_to_string(row, 0)?,
+                        preference: row_to_string(row, 1)?,
+                        topic: row_to_opt_string(row, 2)?,
+                        context_snippet: row_to_opt_string(row, 3)?,
+                        source_memory_id: row_to_opt_string(row, 4)?,
+                        session_id: row_to_string(row, 5)?,
+                        project_scope: row_to_string(row, 6)?,
+                        created_at: row_to_string(row, 7)?,
+                    })
+                })
+            },
+        )
     }
 
     pub fn search_timeline_like(&self, query: &str, project_scope: &str) -> anyhow::Result<Vec<TimelineEventRecord>> {
-        let mut stmt = self.conn.prepare(
+        self.with_cached_stmt(
             "SELECT event_id, date, description, source, source_memory_id, session_id, project_scope, created_at
              FROM timeline WHERE (date LIKE ?1 OR description LIKE ?1)
                AND (project_scope = ?2 OR project_scope = '' OR project_scope IS NULL)",
-        )?;
-        bind_text(&mut stmt, 1, &format!("%{query}%"))?;
-        bind_text(&mut stmt, 2, project_scope)?;
-        collect_rows(&mut stmt, |row| {
-            Ok(TimelineEventRecord {
-                event_id: row_to_string(row, 0)?,
-                date: row_to_string(row, 1)?,
-                description: row_to_string(row, 2)?,
-                source: row_to_opt_string(row, 3)?,
-                source_memory_id: row_to_opt_string(row, 4)?,
-                session_id: row_to_string(row, 5)?,
-                project_scope: row_to_string(row, 6)?,
-                created_at: row_to_string(row, 7)?,
-            })
-        })
+            |stmt| {
+                bind_text(stmt, 1, &format!("%{query}%"))?;
+                bind_text(stmt, 2, project_scope)?;
+                collect_rows(stmt, |row| {
+                    Ok(TimelineEventRecord {
+                        event_id: row_to_string(row, 0)?,
+                        date: row_to_string(row, 1)?,
+                        description: row_to_string(row, 2)?,
+                        source: row_to_opt_string(row, 3)?,
+                        source_memory_id: row_to_opt_string(row, 4)?,
+                        session_id: row_to_string(row, 5)?,
+                        project_scope: row_to_string(row, 6)?,
+                        created_at: row_to_string(row, 7)?,
+                    })
+                })
+            },
+        )
     }
 
     /// Structured memories by session (the facts/preferences/instructions/timeline count summary is used by diagnose).
@@ -864,44 +899,46 @@ impl TursoStorage {
     // -----------------------------------------------------------------------
 
     pub fn get_session_state(&self, session_id: &str) -> anyhow::Result<Option<SessionStateRecord>> {
-        let mut stmt = self.conn.prepare(
+        self.with_cached_stmt(
             "SELECT session_id, project_scope, last_retained_user_turn, has_recalled_for_first_turn
              FROM session_state WHERE session_id = ?1",
-        )?;
-        bind_text(&mut stmt, 1, session_id)?;
-        let mut found = None;
-        let mut err = None;
-        stmt.run_with_row_callback(|row| {
-            match (
-                row_to_string(row, 0),
-                row_to_string(row, 1),
-                row_to_i64(row, 2),
-                row_to_i64(row, 3),
-            ) {
-                (Ok(sid), Ok(scope), turn, recalled) => {
-                    found = Some(SessionStateRecord {
-                        session_id: sid,
-                        project_scope: scope,
-                        last_retained_user_turn: turn,
-                        has_recalled_for_first_turn: recalled != 0,
-                    });
-                    Ok(())
+            |stmt| {
+                bind_text(stmt, 1, session_id)?;
+                let mut found = None;
+                let mut err = None;
+                stmt.run_with_row_callback(|row| {
+                    match (
+                        row_to_string(row, 0),
+                        row_to_string(row, 1),
+                        row_to_i64(row, 2),
+                        row_to_i64(row, 3),
+                    ) {
+                        (Ok(sid), Ok(scope), turn, recalled) => {
+                            found = Some(SessionStateRecord {
+                                session_id: sid,
+                                project_scope: scope,
+                                last_retained_user_turn: turn,
+                                has_recalled_for_first_turn: recalled != 0,
+                            });
+                            Ok(())
+                        }
+                        (Err(e), _, _, _) => {
+                            err = Some(e);
+                            Ok(())
+                        }
+                        _ => Ok(()),
+                    }
+                })?;
+                if let Some(e) = err {
+                    return Err(e);
                 }
-                (Err(e), _, _, _) => {
-                    err = Some(e);
-                    Ok(())
-                }
-                _ => Ok(()),
-            }
-        })?;
-        if let Some(e) = err {
-            return Err(e);
-        }
-        Ok(found)
+                Ok(found)
+            },
+        )
     }
 
     pub fn save_session_state(&self, record: &SessionStateRecord) -> anyhow::Result<()> {
-        let mut stmt = self.conn.prepare(
+        self.with_cached_stmt(
             "INSERT INTO session_state (session_id, project_scope, last_retained_user_turn, has_recalled_for_first_turn)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(session_id) DO UPDATE SET
@@ -909,13 +946,15 @@ impl TursoStorage {
                 last_retained_user_turn = excluded.last_retained_user_turn,
                 has_recalled_for_first_turn = excluded.has_recalled_for_first_turn,
                 updated_at = CURRENT_TIMESTAMP",
-        )?;
-        bind_text(&mut stmt, 1, &record.session_id)?;
-        bind_text(&mut stmt, 2, &record.project_scope)?;
-        bind_int(&mut stmt, 3, record.last_retained_user_turn)?;
-        bind_int(&mut stmt, 4, record.has_recalled_for_first_turn as i64)?;
-        stmt.run_ignore_rows()?;
-        Ok(())
+            |stmt| {
+                bind_text(stmt, 1, &record.session_id)?;
+                bind_text(stmt, 2, &record.project_scope)?;
+                bind_int(stmt, 3, record.last_retained_user_turn)?;
+                bind_int(stmt, 4, record.has_recalled_for_first_turn as i64)?;
+                stmt.run_ignore_rows()?;
+                Ok(())
+            },
+        )
     }
 
     /// Update working_memory.consolidated_at (mark after consolidation).
@@ -983,12 +1022,37 @@ impl Storage for TursoStorage {
     fn diagnose(&self) -> anyhow::Result<serde_json::Value> {
         let working = self.count_working()?;
         let episodic = self.count_episodic()?;
+        // 完整性检查（PRAGMA integrity_check：返回 "ok" 或损坏详情）。
+        // 手动触发可接受慢查询；失败不代表库损坏（可能只是被占用），错误会如实上报。
+        // integrity_check 无错误时返回 NULL（或 "ok"），有错误时返回错误详情文本
+        let integrity = self
+            .conn
+            .prepare("PRAGMA integrity_check")
+            .and_then(|mut stmt| stmt.run_collect_rows());
+        let integrity_status = match &integrity {
+            Ok(rows) => {
+                let texts: Vec<String> = rows
+                    .iter()
+                    .map(|row| match &row[0] {
+                        Value::Text(text) => text.as_str().to_string(),
+                        _ => String::new(),
+                    })
+                    .collect();
+                if texts.is_empty() || texts.iter().all(|t| t.is_empty()) || texts.iter().any(|t| t == "ok") {
+                    "ok"
+                } else {
+                    "corrupt"
+                }
+            }
+            Err(_) => "check-failed",
+        };
         Ok(serde_json::json!({
             "backend": "turso",
             "path": self.path,
             "working_memory_count": working,
             "episodic_memory_count": episodic,
             "fts": "tantivy",
+            "integrity": integrity_status,
         }))
     }
 }
