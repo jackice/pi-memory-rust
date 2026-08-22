@@ -42,7 +42,7 @@ impl StoragePool {
             let storage = TursoStorage::open(db_path.to_str().expect("路径必须为 UTF-8"))?;
             let mut vectors = ProjectVectors::new()?;
             vectors.hydrate(&storage)?;
-            eprintln!("[pi-memory-rust] 打开项目库: {db_path:?}");
+            pi_memory_core::debug_log(&format!("打开项目库: {db_path:?}"));
             self.projects.insert(project_scope.to_string(), ProjectRuntime { storage, vectors });
         }
         Ok(self.projects.get_mut(project_scope).expect("刚插入必有"))
@@ -65,10 +65,14 @@ fn main() {
         std::thread::spawn(move || {
             match pi_memory_core::model_download::ensure_model_dir(&model_dir) {
                 Ok(()) => {
-                    eprintln!("[pi-memory-rust] 模型后台下载完成: {}", model_dir.display());
+                    pi_memory_core::debug_log(&format!("模型后台下载完成: {}", model_dir.display()));
                     shared_for_download.warmup();
                 }
-                Err(e) => eprintln!("[pi-memory-rust] 模型后台下载失败（可稍后 /memory prepare-model 重试）: {e}"),
+                Err(e) => {
+                    pi_memory_core::debug_log(&format!(
+                        "模型后台下载失败（可稍后 /memory prepare-model 重试）: {e}"
+                    ))
+                }
             }
         });
     } else {
@@ -107,8 +111,9 @@ fn serve(pool: &mut StoragePool, shared: &SharedEmbedder) {
             break;
         }
         if shutdown {
-            // 等待后台模型加载线程结束再退出：进程退出与 ONNX 全局初始化并发会 SIGSEGV
-            shared.join_background_load();
+            // 限时等待后台模型加载线程结束再退出（避免进程退出与 ONNX 全局初始化并发 SIGSEGV），
+            // 超时放弃：仅刚启动即退出的罕见场景，不拖慢正常关闭
+            shared.wait_loading(std::time::Duration::from_millis(800));
             break;
         }
     }

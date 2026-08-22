@@ -46,7 +46,7 @@ export default function registerPiMemoryRustExtension(
     prompts = await client.call("llmPrompts", {}, timeoutMs);
   }
 
-  const SHUTDOWN_CONFIRM_TIMEOUT_MS = 3000;
+  const SHUTDOWN_CONFIRM_TIMEOUT_MS = 1500;
   const SHUTDOWN_LLM_TIMEOUT_MS = 1000;
   // turn_end 提取用宽松超时：1s 会让主流模型几乎必超时、每轮都降级规则路径；
   // 仅关闭流程用 SHUTDOWN_LLM_TIMEOUT_MS 收紧退出延迟

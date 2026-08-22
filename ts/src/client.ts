@@ -57,7 +57,11 @@ export class MemoryRustClient {
       binaryPath: options.binaryPath ?? resolveBinaryPath(),
       callTimeoutMs: options.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS,
       maxRestarts: options.maxRestarts ?? 3,
-      log: options.log ?? ((line) => process.stderr.write(`[pi-memory-rust] ${line}\n`)),
+      log: options.log ?? ((line) => {
+        // 默认静默：子进程日志直写 stderr 会污染 pi 的 TUI 渲染；
+        // 设置 PI_MEMORY_DEBUG=1 时输出诊断（Rust 侧内容已去前缀，这里统一加）
+        if (process.env.PI_MEMORY_DEBUG) process.stderr.write(`[pi-memory-rust] ${line}\n`);
+      }),
     };
   }
 
@@ -123,11 +127,12 @@ export class MemoryRustClient {
     const proc = this.proc;
     if (!proc || proc.exitCode !== null) return;
     try {
-      await this.invoke("shutdown", {}, 1000);
-      await this.waitForExit(proc, 1000);
+      // Rust 侧会在响应后限时等待后台模型加载结束再退出（≤800ms），此处给足退出余量
+      await this.invoke("shutdown", {}, 500);
+      await this.waitForExit(proc, 1500);
     } catch {
       proc.kill("SIGKILL");
-      await this.waitForExit(proc, 1000).catch(() => {});
+      await this.waitForExit(proc, 1500).catch(() => {});
     } finally {
       if (this.proc === proc) {
         this.proc = null;

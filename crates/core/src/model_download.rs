@@ -62,11 +62,11 @@ fn download_with_fallback(remote: &str, target: &std::path::Path) -> Result<()> 
         let url = format!("{base}/{remote}");
         match download_file(&url, target) {
             Ok(()) => {
-                eprintln!("[pi-memory-rust] 模型文件下载完成: {url}");
+                crate::debug_log(&format!("模型文件下载完成: {url}"));
                 return Ok(());
             }
             Err(e) => {
-                eprintln!("[pi-memory-rust] 下载失败（尝试下一源） {url}: {e}");
+                crate::debug_log(&format!("下载失败（尝试下一源） {url}: {e}"));
             }
         }
     }

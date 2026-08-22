@@ -6,7 +6,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 
 use crate::embedding::Embedder;
 use crate::models::{MemoryEmbeddingRecord, MemoryKind};
@@ -35,8 +36,8 @@ enum EmbedderState {
 #[derive(Clone)]
 pub struct SharedEmbedder {
     inner: Arc<Mutex<EmbedderState>>,
-    /// 后台 warmup 加载线程句柄（进程退出前 join，避免与 ONNX 全局初始化竞态）。
-    loading_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    /// 后台 warmup 加载完成通知（进程退出前限时等待，避免与 ONNX 全局初始化竞态）。
+    loading_done: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
     model_dir: PathBuf,
 }
 
@@ -50,7 +51,7 @@ impl SharedEmbedder {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(EmbedderState::Unloaded)),
-            loading_handle: Arc::new(Mutex::new(None)),
+            loading_done: Arc::new(Mutex::new(None)),
             model_dir: default_model_dir(),
         }
     }
@@ -80,30 +81,34 @@ impl SharedEmbedder {
         }
         let inner = Arc::clone(&self.inner);
         let model_dir = self.model_dir.clone();
-        let handle = std::thread::spawn(move || {
+        // 完成通知：状态落定后 send，进程退出前可据此限时等待，避免强杀 ONNX 初始化线程
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
             let loaded = Embedder::load(&model_dir);
             let mut state = inner.lock().expect("锁中毒");
             match loaded {
                 Ok(embedder) => {
-                    eprintln!("[pi-memory-rust] embedding 模型加载成功: {}", model_dir.display());
+                    crate::debug_log(&format!("embedding 模型加载成功: {}", model_dir.display()));
                     *state = EmbedderState::Ready(embedder);
                 }
                 Err(error) => {
-                    eprintln!(
-                        "[pi-memory-rust] embedding 模型加载失败（降级 FTS-only）: {error}\n  model_dir: {}",
+                    crate::debug_log(&format!(
+                        "embedding 模型加载失败（降级 FTS-only）: {error}\n  model_dir: {}",
                         model_dir.display()
-                    );
+                    ));
                     *state = EmbedderState::Failed;
                 }
             }
+            let _ = tx.send(());
         });
-        *self.loading_handle.lock().expect("锁中毒") = Some(handle);
+        *self.loading_done.lock().expect("锁中毒") = Some(rx);
     }
 
-    /// 等待后台 warmup 加载线程结束（进程退出前调用，避免与 ONNX 全局初始化竞态导致 SIGSEGV）。
-    pub fn join_background_load(&self) {
-        if let Some(handle) = self.loading_handle.lock().expect("锁中毒").take() {
-            let _ = handle.join();
+    /// 限时等待后台 warmup 加载线程结束；超时放弃（仅刚启动即退出的罕见场景）。
+    pub fn wait_loading(&self, timeout: Duration) {
+        let rx = self.loading_done.lock().expect("锁中毒").take();
+        if let Some(rx) = rx {
+            let _ = rx.recv_timeout(timeout);
         }
     }
 
@@ -132,15 +137,15 @@ impl SharedEmbedder {
         let mut state = self.inner.lock().expect("锁中毒");
         match loaded {
             Ok(embedder) => {
-                eprintln!("[pi-memory-rust] embedding 模型加载成功: {}", self.model_dir.display());
+                crate::debug_log(&format!("embedding 模型加载成功: {}", self.model_dir.display()));
                 *state = EmbedderState::Ready(embedder);
                 true
             }
             Err(error) => {
-                eprintln!(
-                    "[pi-memory-rust] embedding 模型加载失败（降级 FTS-only）: {error}\n  model_dir: {}",
+                crate::debug_log(&format!(
+                    "embedding 模型加载失败（降级 FTS-only）: {error}\n  model_dir: {}",
                     self.model_dir.display()
-                );
+                ));
                 *state = EmbedderState::Failed;
                 false
             }

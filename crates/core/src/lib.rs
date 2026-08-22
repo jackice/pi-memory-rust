@@ -14,3 +14,12 @@ pub mod protocol;
 pub mod runtime;
 pub mod storage;
 pub mod vector_index;
+
+/// 信息级诊断日志：仅当设置 PI_MEMORY_DEBUG=1 时输出到 stderr。
+/// 子进程 stderr 会被宿主透传，直接输出会污染 pi 的 TUI 渲染；
+/// 错误信息已通过 RPC 错误响应返回，stderr 仅作额外诊断。
+pub fn debug_log(msg: &str) {
+    if std::env::var("PI_MEMORY_DEBUG").is_ok() {
+        eprintln!("{msg}");
+    }
+}
