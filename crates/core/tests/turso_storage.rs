@@ -357,3 +357,31 @@ fn turso_diagnose() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn concurrent_write_waits_with_busy_timeout() {
+    // 两个连接（模拟两个 pi 会话共享同一项目 DB）：libSQL WAL + busy_timeout 下，
+    // 短写冲突应等待对方提交后成功，而不是立即报错。
+    let path = temp_db_path("turso-busy.db");
+    let _ = std::fs::remove_file(&path);
+    let s1 = TursoStorage::open(&path).expect("open s1");
+    let s2 = TursoStorage::open(&path).expect("open s2");
+
+    // s1 持写锁的事务
+    s1.begin_tx().expect("begin");
+    s1.insert_working(&wm("wm-1", "content a", "/p")).expect("insert 1");
+
+    // s2 在 s1 事务未提交时写入：busy_timeout 内等待，s1 提交后成功
+    let t = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        s2.insert_working(&wm("wm-2", "content b", "/p")).map(|_| ())
+    });
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    s1.commit_tx().expect("commit");
+
+    let result = t.join().expect("join");
+    assert!(result.is_ok(), "busy_timeout 下并发写应等待成功: {result:?}");
+    assert_eq!(s1.list_working_by_project("/p").expect("list").len(), 2, "两次写入都应落库");
+
+    let _ = std::fs::remove_file(&path);
+}

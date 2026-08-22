@@ -119,14 +119,41 @@ pub struct TursoStorage {
 
 impl TursoStorage {
     /// Open (or create) a local database file and initialize the schema.
+    ///
+    /// Concurrency notes:
+    /// - multiprocess WAL lifts the exclusive file lock so multiple pi sessions can share one
+    ///   project DB; combined with PRAGMA busy_timeout, cross-process write contention becomes a
+    ///   brief wait instead of an immediate failure;
+    /// - two processes opening a brand-new DB at the exact same moment race to create the shared
+    ///   WAL coordination file; the loser gets a transient "magic mismatch" error, so retry.
     pub fn open(path: &str) -> anyhow::Result<Self> {
+        let mut last_err = None;
+        for attempt in 0..3 {
+            match Self::open_once(path) {
+                Ok(storage) => return Ok(storage),
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < 2 {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
+            }
+        }
+        Err(last_err.expect("loop always runs at least once"))
+    }
+
+    fn open_once(path: &str) -> anyhow::Result<Self> {
         let io = Database::io_for_path(path)?;
-        // The Tantivy FTS index (USING fts) is an experimental index method and must be enabled explicitly
-        let opts = DatabaseOpts::new().with_index_method(true);
+        // The Tantivy FTS index (USING fts) is an experimental index method and must be enabled explicitly.
+        // multiprocess WAL lifts the exclusive file lock so multiple pi sessions can share one project DB.
+        let opts = DatabaseOpts::new().with_index_method(true).with_multiprocess_wal(true);
         let db = Database::open_file_with_flags(io, path, OpenFlags::default(), opts, None)?;
         let conn = db.connect()?;
         let storage = Self { conn, path: path.to_string() };
         storage.init()?;
+        // Multi-session resilience: a busy_timeout turns cross-process write contention into a bounded
+        // wait instead of an immediate error, so concurrent pi sessions rarely fail on retain
+        storage.conn.execute("PRAGMA busy_timeout = 3000")?;
         Ok(storage)
     }
 
