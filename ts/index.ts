@@ -19,10 +19,12 @@ export interface LlmProvider {
 
 interface UiLike {
   notify?: (message: string, level?: string) => void;
+  confirm?: (title: string, message: string, opts?: { timeout?: number; signal?: AbortSignal }) => Promise<boolean>;
 }
 
 interface CtxLike {
   cwd?: string;
+  hasUI?: boolean;
   sessionManager?: { getSessionId?: () => string };
   ui?: UiLike;
 }
@@ -39,9 +41,47 @@ export default function registerPiMemoryRustExtension(
   const client = new MemoryRustClient();
   let prompts: { extract: string; consolidate: string } | null = null;
 
-  async function ensurePrompts(): Promise<void> {
+  async function ensurePrompts(timeoutMs?: number): Promise<void> {
     if (prompts) return;
-    prompts = await client.call("llmPrompts");
+    prompts = await client.call("llmPrompts", {}, timeoutMs);
+  }
+
+  const SHUTDOWN_CONFIRM_TIMEOUT_MS = 3000;
+  const SHUTDOWN_LLM_TIMEOUT_MS = 1000;
+
+  function hasShutdownUi(ctx: CtxLike | undefined): ctx is CtxLike & { hasUI: true; ui: Required<Pick<UiLike, "confirm">> } {
+    return ctx?.hasUI !== false && typeof ctx?.ui?.confirm === "function";
+  }
+
+  async function shouldSummarizeOnShutdown(event: { reason?: string }, ctx: CtxLike | undefined): Promise<boolean> {
+    if (event.reason !== "quit") return false;
+    if (!hasShutdownUi(ctx)) return false;
+    try {
+      return await ctx.ui.confirm(
+        "结束前是否总结当前 session？",
+        "总结会整理当前 session 的 working 记忆，可能需要一些时间。",
+        { timeout: SHUTDOWN_CONFIRM_TIMEOUT_MS },
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+    return await new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`${label} 超时`)), timeoutMs);
+      timer.unref();
+      promise.then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
   }
 
   /**
@@ -61,11 +101,11 @@ export default function registerPiMemoryRustExtension(
     return createPiAiLlmProvider({ model: c.model, registry: c.modelRegistry });
   }
 
-  async function runLlm(prompt: string, ctx: unknown): Promise<{ result?: string; failed: boolean }> {
+  async function runLlm(prompt: string, ctx: unknown, timeoutMs = SHUTDOWN_LLM_TIMEOUT_MS): Promise<{ result?: string; failed: boolean }> {
     const provider = resolveLlm(ctx);
     if (!provider) return { failed: false };
     try {
-      return { result: await provider.complete(prompt), failed: false };
+      return { result: await withTimeout(provider.complete(prompt), timeoutMs, "LLM 总结"), failed: false };
     } catch {
       return { failed: true };
     }
@@ -81,23 +121,26 @@ export default function registerPiMemoryRustExtension(
 
   pi.on("session_shutdown", async (event, ctx) => {
     try {
-      await ensurePrompts();
-      // LLM 输入：当前 session 未 consolidated 的 working 内容
-      const source = await client.call<string>("consolidateSource", {
-        sessionId: resolveSessionId(ctx),
-        projectScope: resolveProjectScope(ctx),
-      });
-      const { result, failed } = await runLlm(`${prompts?.consolidate ?? ""}\n\n${source}`, ctx);
-      await client.call("consolidateSessionMemories", {
-        sessionId: resolveSessionId(ctx),
-        projectScope: resolveProjectScope(ctx),
-        llmResult: result,
-        llmFailed: failed,
-      });
+      if (await shouldSummarizeOnShutdown(event, ctx as CtxLike | undefined)) {
+        await ensurePrompts(SHUTDOWN_LLM_TIMEOUT_MS);
+        // LLM 输入：当前 session 未 consolidated 的 working 内容
+        const source = await client.call<string>("consolidateSource", {
+          sessionId: resolveSessionId(ctx),
+          projectScope: resolveProjectScope(ctx),
+        }, SHUTDOWN_LLM_TIMEOUT_MS);
+        const { result, failed } = await runLlm(`${prompts?.consolidate ?? ""}\n\n${source}`, ctx, SHUTDOWN_LLM_TIMEOUT_MS);
+        await client.call("consolidateSessionMemories", {
+          sessionId: resolveSessionId(ctx),
+          projectScope: resolveProjectScope(ctx),
+          llmResult: result,
+          llmFailed: failed,
+        }, SHUTDOWN_LLM_TIMEOUT_MS);
+      }
     } catch (error) {
       notify(ctx as CtxLike | undefined, "consolidate", error);
+    } finally {
+      await client.shutdown().catch(() => {});
     }
-    await client.shutdown().catch(() => {});
   });
 
   pi.on("before_agent_start", async (event, ctx) => {

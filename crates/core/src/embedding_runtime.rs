@@ -23,17 +23,31 @@ pub fn default_model_dir() -> PathBuf {
         .unwrap_or_else(|_| std::env::temp_dir().join("pi-memory-rust").join("model"))
 }
 
+#[allow(clippy::large_enum_variant)]
+enum EmbedderState {
+    Unloaded,
+    Loading,
+    Ready(Embedder),
+    Failed,
+}
+
 /// 全局共享的 Embedder 句柄（模型只加载一份）。
 #[derive(Clone)]
 pub struct SharedEmbedder {
-    inner: Arc<Mutex<Option<Embedder>>>,
+    inner: Arc<Mutex<EmbedderState>>,
     model_dir: PathBuf,
+}
+
+impl Default for SharedEmbedder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SharedEmbedder {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(None)),
+            inner: Arc::new(Mutex::new(EmbedderState::Unloaded)),
             model_dir: default_model_dir(),
         }
     }
@@ -43,26 +57,77 @@ impl SharedEmbedder {
         crate::model_download::model_dir_complete(&self.model_dir)
     }
 
-    /// 确保已加载（仅模型文件完整时尝试；下载由启动线程/命令负责）。
-    pub fn ensure_loaded(&self) -> bool {
-        let mut guard = self.inner.lock().expect("锁中毒");
-        if guard.is_some() {
-            return true;
+    /// 后台预热模型；未就绪或已有加载任务时立即返回。
+    pub fn warmup(&self) {
+        if !self.model_ready() {
+            return;
         }
-        if !crate::model_download::model_dir_complete(&self.model_dir) {
+        let should_start = {
+            let mut state = self.inner.lock().expect("锁中毒");
+            if matches!(*state, EmbedderState::Unloaded) {
+                *state = EmbedderState::Loading;
+                true
+            } else {
+                false
+            }
+        };
+        if !should_start {
+            return;
+        }
+        let inner = Arc::clone(&self.inner);
+        let model_dir = self.model_dir.clone();
+        std::thread::spawn(move || {
+            let loaded = Embedder::load(&model_dir);
+            let mut state = inner.lock().expect("锁中毒");
+            match loaded {
+                Ok(embedder) => {
+                    eprintln!("[pi-memory-rust] embedding 模型加载成功: {}", model_dir.display());
+                    *state = EmbedderState::Ready(embedder);
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[pi-memory-rust] embedding 模型加载失败（降级 FTS-only）: {error}\n  model_dir: {}",
+                        model_dir.display()
+                    );
+                    *state = EmbedderState::Failed;
+                }
+            }
+        });
+    }
+
+    /// 确保已加载；后台加载进行中时立即返回 false，让调用方走 FTS-only。
+    pub fn ensure_loaded(&self) -> bool {
+        let should_load = {
+            let mut state = self.inner.lock().expect("锁中毒");
+            match &*state {
+                EmbedderState::Ready(_) => return true,
+                EmbedderState::Loading | EmbedderState::Failed => return false,
+                EmbedderState::Unloaded => {
+                    if !self.model_ready() {
+                        return false;
+                    }
+                    *state = EmbedderState::Loading;
+                    true
+                }
+            }
+        };
+        if !should_load {
             return false;
         }
-        match Embedder::load(&self.model_dir) {
-            Ok(e) => {
+        let loaded = Embedder::load(&self.model_dir);
+        let mut state = self.inner.lock().expect("锁中毒");
+        match loaded {
+            Ok(embedder) => {
                 eprintln!("[pi-memory-rust] embedding 模型加载成功: {}", self.model_dir.display());
-                *guard = Some(e);
+                *state = EmbedderState::Ready(embedder);
                 true
             }
-            Err(e) => {
+            Err(error) => {
                 eprintln!(
-                    "[pi-memory-rust] embedding 模型加载失败（降级 FTS-only）: {e}\n  model_dir: {}",
+                    "[pi-memory-rust] embedding 模型加载失败（降级 FTS-only）: {error}\n  model_dir: {}",
                     self.model_dir.display()
                 );
+                *state = EmbedderState::Failed;
                 false
             }
         }
@@ -70,20 +135,24 @@ impl SharedEmbedder {
 
     /// 状态描述（诊断用）。
     pub fn status(&self) -> String {
-        if self.inner.lock().expect("锁中毒").is_some() {
-            "on".into()
-        } else if self.model_ready() {
-            "model-error".into()
-        } else {
-            "off (模型未就绪)".into()
+        let state = self.inner.lock().expect("锁中毒");
+        match &*state {
+            EmbedderState::Ready(_) => "on".into(),
+            EmbedderState::Loading => "loading".into(),
+            EmbedderState::Failed if self.model_ready() => "model-error".into(),
+            _ => "off (模型未就绪)".into(),
         }
     }
 
-    /// 编码一批文本（首次调用会触发模型加载；模型不可用返回 None → 调用方降级）。
+    /// 编码一批文本；模型加载中或不可用时返回 None → 调用方降级。
     pub fn embed(&self, texts: &[String]) -> Option<Vec<Vec<f32>>> {
-        self.ensure_loaded();
-        let mut guard = self.inner.lock().expect("锁中毒");
-        let embedder = guard.as_mut()?;
+        if !self.ensure_loaded() {
+            return None;
+        }
+        let mut state = self.inner.lock().expect("锁中毒");
+        let EmbedderState::Ready(embedder) = &mut *state else {
+            return None;
+        };
         embedder.embed(texts).ok()
     }
 }
@@ -116,6 +185,52 @@ impl ProjectVectors {
             memory_to_id: HashMap::new(),
             content_map: HashMap::new(),
         })
+    }
+
+    /// 从数据库恢复向量索引。
+    pub fn hydrate(&mut self, storage: &TursoStorage) -> anyhow::Result<()> {
+        let working = storage
+            .list_all_working()?
+            .into_iter()
+            .map(|row| (row.id, row.content))
+            .collect::<HashMap<_, _>>();
+        let episodic = storage
+            .list_all_episodic()?
+            .into_iter()
+            .map(|row| (row.id, row.content))
+            .collect::<HashMap<_, _>>();
+        let mut vectors: Vec<Vec<f32>> = Vec::new();
+        let mut ids: Vec<u64> = Vec::new();
+        let mut items: Vec<(MemoryKind, String, String)> = Vec::new();
+        for embedding in storage.list_all_embeddings()? {
+            let content = match embedding.memory_kind {
+                MemoryKind::Working => working.get(&embedding.memory_id).cloned(),
+                MemoryKind::Episodic => episodic.get(&embedding.memory_id).cloned(),
+                _ => None,
+            };
+            let Some(content) = content else {
+                continue;
+            };
+            if embedding.embedding.len() != crate::vector_index::DEFAULT_DIM {
+                continue;
+            }
+            let vector = embedding.embedding.iter().map(|&v| v as f32).collect::<Vec<_>>();
+            let id = self.index.next_id_hint() + items.len() as u64;
+            vectors.push(vector);
+            ids.push(id);
+            items.push((embedding.memory_kind, embedding.memory_id, content));
+        }
+        if vectors.is_empty() {
+            return Ok(());
+        }
+        self.index.add_with_ids(&vectors, &ids)?;
+        for ((kind, memory_id, content), id) in items.into_iter().zip(ids) {
+            let key = (kind, memory_id.clone());
+            self.content_map.insert(key.clone(), content);
+            self.id_to_memory.insert(id, key.clone());
+            self.memory_to_id.insert(key, id);
+        }
+        Ok(())
     }
 
     /// retain 路径：embed 文本并入库 + 入索引。
@@ -184,7 +299,7 @@ impl ProjectVectors {
         }
         // 2) 批量索引 add
         let ids = self.index.add(embeddings)?;
-        for ((item, id), embedding) in items.iter().zip(ids.iter()).zip(embeddings.iter()) {
+        for ((item, id), _embedding) in items.iter().zip(ids.iter()).zip(embeddings.iter()) {
             let key = (item.0, item.1.clone());
             self.content_map.insert(key.clone(), item.2.clone());
             self.id_to_memory.insert(*id, key.clone());

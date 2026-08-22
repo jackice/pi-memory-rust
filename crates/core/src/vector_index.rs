@@ -66,6 +66,29 @@ impl VectorIndex {
         Ok(ids)
     }
 
+    /// 使用已有外部 id 恢复一批向量，避免重启后映射漂移。
+    pub fn add_with_ids(&self, vectors: &[Vec<f32>], ids: &[u64]) -> anyhow::Result<()> {
+        anyhow::ensure!(vectors.len() == ids.len(), "向量与 id 数量不一致");
+        if vectors.is_empty() {
+            return Ok(());
+        }
+        let dim = vectors[0].len();
+        let mut flat = Vec::with_capacity(vectors.len() * dim);
+        for vector in vectors {
+            anyhow::ensure!(vector.len() == dim, "向量维度不一致");
+            flat.extend_from_slice(vector);
+        }
+        let mut index = self.index.lock().expect("锁中毒");
+        index
+            .add_with_ids(&flat, ids)
+            .map_err(|e| anyhow::anyhow!("turbovec 恢复失败: {e:?}"))?;
+        drop(index);
+        let next = ids.iter().copied().max().map_or(0, |id| id.saturating_add(1));
+        let mut next_id = self.next_id.lock().expect("锁中毒");
+        *next_id = (*next_id).max(next);
+        Ok(())
+    }
+
     /// 删除（O(1) by id）。
     pub fn remove(&self, id: u64) -> anyhow::Result<()> {
         let removed = {
@@ -103,7 +126,17 @@ impl VectorIndex {
 
     /// 索引内向量数。
     pub fn len(&self) -> usize {
-        self.index.lock().expect("锁中毒").len() as usize
+        self.index.lock().expect("锁中毒").len()
+    }
+
+    /// 下一个可分配的外部 id。
+    pub(crate) fn next_id_hint(&self) -> u64 {
+        *self.next_id.lock().expect("锁中毒")
+    }
+
+    /// 索引是否为空。
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// 同步持久化（启用时）。

@@ -4,6 +4,8 @@
 //! 下载失败不阻塞主流程（embedding 降级 FTS-only）。
 
 use anyhow::{Context, Result};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 /// 官方源与镜像基址（模型仓库根目录）
 const HF_OFFICIAL: &str = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main";
@@ -23,6 +25,11 @@ pub fn model_dir_complete(dir: &std::path::Path) -> bool {
 /// 确保模型目录可用：完整则直接返回；否则下载缺失文件。
 /// 下载全部失败时返回 Err（调用方降级）。
 pub fn ensure_model_dir(dir: &std::path::Path) -> Result<()> {
+    if model_dir_complete(dir) {
+        return Ok(());
+    }
+    static DOWNLOAD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = DOWNLOAD_LOCK.get_or_init(|| Mutex::new(())).lock().expect("下载锁中毒");
     if model_dir_complete(dir) {
         return Ok(());
     }
@@ -67,7 +74,13 @@ fn download_with_fallback(remote: &str, target: &std::path::Path) -> Result<()> 
 }
 
 fn download_file(url: &str, target: &std::path::Path) -> Result<()> {
-    let response = ureq::get(url).call().with_context(|| format!("HTTP 请求失败: {url}"))?;
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(120)))
+            .timeout_connect(Some(Duration::from_secs(15)))
+            .build(),
+    );
+    let response = agent.get(url).call().with_context(|| format!("HTTP 请求失败: {url}"))?;
     let mut body = Vec::new();
     let mut reader = std::io::Read::take(response.into_body().into_reader(), 512 * 1024 * 1024); // 512MB 上限
     std::io::Read::read_to_end(&mut reader, &mut body).with_context(|| "读取响应失败")?;

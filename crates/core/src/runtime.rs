@@ -25,9 +25,6 @@ pub fn build_recall_injection(
     shared: &SharedEmbedder,
     vectors: &mut ProjectVectors,
 ) -> anyhow::Result<String> {
-    let _working = storage.list_working_by_project(project_scope)?;
-    let _episodic = storage.list_episodic_by_project(project_scope)?;
-
     let structured = query_structured_candidates(storage, prompt, project_scope)?;
 
     let safe_fts_query = to_safe_fts_query(prompt);
@@ -89,6 +86,7 @@ pub fn build_recall_injection(
 /// 节奏 retain（对应 retainDefaultTurnMemories）。embedding 可用时写入向量。
 /// `llm_result`：TS 侧调 LLM 生成的结构化 JSON（对应 extractStructuredMemories 的 LLM 路径）；
 /// 为 None 时走规则启发式。
+#[allow(clippy::too_many_arguments)]
 pub fn retain_turn_memories(
     storage: &TursoStorage,
     turn_index: i64,

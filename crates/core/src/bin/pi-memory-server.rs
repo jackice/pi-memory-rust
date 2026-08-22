@@ -40,7 +40,8 @@ impl StoragePool {
         if !self.projects.contains_key(project_scope) {
             let db_path = paths::ensure_project_db_dir(&self.data_dir, project_scope)?;
             let storage = TursoStorage::open(db_path.to_str().expect("路径必须为 UTF-8"))?;
-            let vectors = ProjectVectors::new()?;
+            let mut vectors = ProjectVectors::new()?;
+            vectors.hydrate(&storage)?;
             eprintln!("[pi-memory-rust] 打开项目库: {db_path:?}");
             self.projects.insert(project_scope.to_string(), ProjectRuntime { storage, vectors });
         }
@@ -60,12 +61,18 @@ fn main() {
     if !shared.model_ready() {
         // 模型未就绪：后台线程下载（不阻塞 RPC 主循环），或 /memory prepare-model 手动触发
         let model_dir = pi_memory_core::embedding_runtime::default_model_dir();
+        let shared_for_download = shared.clone();
         std::thread::spawn(move || {
             match pi_memory_core::model_download::ensure_model_dir(&model_dir) {
-                Ok(()) => eprintln!("[pi-memory-rust] 模型后台下载完成: {}", model_dir.display()),
+                Ok(()) => {
+                    eprintln!("[pi-memory-rust] 模型后台下载完成: {}", model_dir.display());
+                    shared_for_download.warmup();
+                }
                 Err(e) => eprintln!("[pi-memory-rust] 模型后台下载失败（可稍后 /memory prepare-model 重试）: {e}"),
             }
         });
+    } else {
+        shared.warmup();
     }
 
     serve(&mut pool, &shared);
@@ -271,7 +278,7 @@ fn handle_request(request: &RpcRequest, pool: &mut StoragePool, shared: &SharedE
             let model_dir = pi_memory_core::embedding_runtime::default_model_dir();
             match pi_memory_core::model_download::ensure_model_dir(&model_dir) {
                 Ok(()) => {
-                    shared.ensure_loaded();
+                    shared.warmup();
                     RpcResponse::ok(request.id, serde_json::json!("模型就绪"))
                 }
                 Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),

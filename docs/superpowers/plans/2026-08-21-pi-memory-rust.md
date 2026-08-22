@@ -9,7 +9,7 @@
 
 ## 1. 目标与范围
 
-在独立新仓库 `pi-memory-rust` 中用 Rust 重写 pi-memory（turso_core 存储 + Tantivy FTS + turbovec 向量 + ort embedding），pi extensions 侧通过 NAPI 二进制集成（参照 oh-my-pi 模式）。现有 pi-memory（TS v0.1.2）保持不动，作为行为基准。
+在独立新仓库 `pi-memory-rust` 中用 Rust 重写 pi-memory（turso_core 存储 + Tantivy FTS + turbovec 向量 + ort embedding），pi extensions 侧通过子进程 JSON-RPC 集成。现有 pi-memory（TS v0.1.2）保持不动，作为行为基准。
 
 **关键依赖版本**（已验证可用）：
 - `turbovec = "1.0.0"`（crates.io）
@@ -23,7 +23,7 @@
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| M1 | 工程骨架 + Rust 核心替换（行为等价） | 现有 bun test 规则路径用例在 Rust 侧等价通过；/memory 命令可用；NAPI 加载链路通 |
+| M1 | 工程骨架 + Rust 核心替换（行为等价） | 现有 bun test 规则路径用例在 Rust 侧等价通过；/memory 命令可用；JSON-RPC 生命周期链路通 |
 | M2 | ort embedding + turbovec 索引 + 混合召回 | 召回质量优于 local-hash；延迟达标 |
 | M3 | LLM 代理 + 迁移工具 + 多平台构建 | 全功能可用 |
 
@@ -60,7 +60,7 @@
 
 ### T4 桥接与命令
 
-1. napi 层导出：`retainTurnMemories` / `buildRecallInjection` / `consolidateSessionMemories` / `diagnose` / `clear` / `rebuild`（typed array 用于 embedding 批量传入）。
+1. Rust server 通过 JSON-RPC 提供：`retainTurnMemories` / `buildRecallInjection` / `consolidateSessionMemories` / `diagnose` / `clear` / `rebuild`。
 2. TS 薄壳：绑定 pi 事件（before_agent_start / turn_end / session_shutdown）+ 注册命令。
 3. 全链路超时与失败降级（二进制/引擎异常不阻塞 pi 主流程）。
 4. 验收：pi 侧 `/memory` 命令全通；行为与 TS 版一致。

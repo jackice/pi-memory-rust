@@ -1,5 +1,8 @@
 //! turbovec 向量索引集成测试。
 
+use pi_memory_core::embedding_runtime::ProjectVectors;
+use pi_memory_core::models::{MemoryEmbeddingRecord, MemoryKind, WorkingMemoryRecord};
+use pi_memory_core::storage::TursoStorage;
 use pi_memory_core::vector_index::VectorIndex;
 
 fn unit_vector(dim: usize, seed: f32) -> Vec<f32> {
@@ -37,7 +40,7 @@ fn allowlist_filters_results() {
 #[test]
 fn remove_omits_vector() {
     let index = VectorIndex::new(8, None).expect("创建索引失败");
-    index.add(&vec![unit_vector(8, 0.0), unit_vector(8, 1.0)]).expect("add 失败");
+    index.add(&[unit_vector(8, 0.0), unit_vector(8, 1.0)]).expect("add 失败");
 
     index.remove(0).expect("remove 失败");
     let hits = index.search(&unit_vector(8, 0.0), 1).expect("检索失败");
@@ -54,11 +57,51 @@ fn sync_persistence_roundtrip() {
     // 写入
     {
         let index = VectorIndex::new(8, Some(path.clone())).expect("创建索引失败");
-        index.add(&vec![unit_vector(8, 0.0), unit_vector(8, 3.0)]).expect("add 失败");
+        index.add(&[unit_vector(8, 0.0), unit_vector(8, 3.0)]).expect("add 失败");
     }
     // 读取：turbovec 的 sync 文件可被 IdMapIndex::load 恢复（由 VectorIndex 后续支持 load）
     let restored = turbovec::IdMapIndex::load(&path).expect("load 失败");
     assert_eq!(restored.len(), 2, "持久化索引应恢复 2 个向量");
 
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn hydrate_rebuilds_project_vector_index() {
+    let dir = std::env::temp_dir().join("pi-memory-rust-test-hydrate");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("memory.db");
+    let db = TursoStorage::open(db_path.to_str().unwrap()).unwrap();
+    db.insert_working(&WorkingMemoryRecord {
+        id: "wm-1".into(),
+        content: "事实: 项目正式采用 Rust".into(),
+        embed_text: Some("事实: 项目正式采用 Rust".into()),
+        source: Some("test".into()),
+        session_id: "s1".into(),
+        project_scope: "/proj/a".into(),
+        importance: 0.5,
+        memory_type: "working".into(),
+        metadata: None,
+        created_at: "2026-08-21T00:00:00.000Z".into(),
+        updated_at: "2026-08-21T00:00:00.000Z".into(),
+        consolidated_at: None,
+        valid_until: None,
+        superseded_by: None,
+    }).unwrap();
+    db.save_embedding(&MemoryEmbeddingRecord {
+        memory_kind: MemoryKind::Working,
+        memory_id: "wm-1".into(),
+        embedding: vec![0.1; 384],
+        model: "model".into(),
+    }).unwrap();
+
+    let mut vectors = ProjectVectors::new().unwrap();
+    vectors.hydrate(&db).unwrap();
+    let shared = pi_memory_core::embedding_runtime::SharedEmbedder::new();
+    let hits = vectors
+        .build_embedding_candidates(&shared, "Rust", &[ (MemoryKind::Working, "wm-1".into()) ])
+        .unwrap();
+    assert!(!hits.is_empty(), "hydrate 后应恢复可检索向量");
+    let _ = std::fs::remove_dir_all(&dir);
 }

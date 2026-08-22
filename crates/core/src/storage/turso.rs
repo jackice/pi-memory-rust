@@ -195,6 +195,18 @@ impl TursoStorage {
         collect_first_row(&mut stmt, working_from_row)
     }
 
+    /// 按 id 查询 episodic memory。
+    pub fn get_episodic(&self, id: &str) -> anyhow::Result<Option<EpisodicMemoryRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, content, summary_of, session_id, project_scope,
+                    importance, tier, metadata_json, memory_type,
+                    created_at, updated_at, degraded_at, valid_until, superseded_by
+             FROM episodic_memory WHERE id = ?1",
+        )?;
+        bind_text(&mut stmt, 1, id)?;
+        collect_first_row(&mut stmt, episodic_from_row)
+    }
+
     /// 开启事务（批量写入性能：Tantivy FTS 索引在 COMMIT 时一次性更新）。
     pub fn begin_tx(&self) -> anyhow::Result<()> {
         self.conn.execute("BEGIN")?;

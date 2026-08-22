@@ -5,7 +5,7 @@
 //! 测什么（全部本地计算，零 LLM API 消耗）：
 //! - 写入：N 条记忆（retain 真实路径：规则提取 + ONNX embedding + turbovec 索引 + Tantivy FTS）
 //! - 召回：M 个查询的 buildRecallInjection 延迟（FTS 粗筛 + embedding 精排 + 多路合并）
-//! 验收对照：万级记忆 recall 注入 ≤ 300ms（spec §6）。
+//!   验收对照：万级记忆 recall 注入 ≤ 300ms（spec §6）。
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -65,7 +65,7 @@ fn main() {
     let mut records: Vec<pi_memory_core::models::WorkingMemoryRecord> = Vec::with_capacity(count);
     for (batch_start, chunk) in texts.chunks(batch_size).enumerate() {
         let t_embed = Instant::now();
-        let embeddings = shared.embed(&chunk.to_vec()).expect("embed 失败");
+        let embeddings = shared.embed(chunk).expect("embed 失败");
         embed_total += t_embed.elapsed();
         for (offset, (text, embedding)) in chunk.iter().zip(embeddings.iter()).enumerate() {
             let i = batch_start * batch_size + offset;
@@ -126,10 +126,10 @@ fn main() {
     if count >= 5 {
         println!("\n[单条写入] 抽样 5 条 retain（真实路径，含规则提取 + 单条 embed）...");
         let mut single_latencies = Vec::new();
-        for i in 0..5 {
+        for (i, text) in texts.iter().enumerate().take(5) {
             let t = Instant::now();
             retain_turn_memories(
-                &storage, 100_000 + i as i64, &texts[i], "bench-session", &scope, &shared, &mut vectors, None,
+                &storage, 100_000 + i as i64, text, "bench-session", &scope, &shared, &mut vectors, None,
             )
             .expect("retain 失败");
             single_latencies.push(t.elapsed().as_secs_f64() * 1000.0);

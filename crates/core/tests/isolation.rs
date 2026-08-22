@@ -4,7 +4,7 @@
 use pi_memory_core::embedding_runtime::{ProjectVectors, SharedEmbedder};
 use pi_memory_core::paths;
 use pi_memory_core::runtime::{build_recall_injection, retain_turn_memories};
-use pi_memory_core::storage::{Storage, TursoStorage};
+use pi_memory_core::storage::TursoStorage;
 
 fn isolated_test_dir(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join("pi-memory-rust-isolation").join(name);

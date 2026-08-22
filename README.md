@@ -20,6 +20,7 @@ Design decisions (see `docs/superpowers/specs/` for the full design):
 - **Subprocess JSON-RPC instead of NAPI**: crash isolation (a Rust crash never takes down the Pi host), timeout-killable calls, minimal tooling, host-version independent. NAPI's zero-copy advantage is irrelevant at this call frequency.
 - **Heavy work stays in the subprocess**: only small payloads cross the process boundary (prompt, Top-K candidates); embedding batches never leave the Rust process.
 - **Behavior-equivalent**: recall/retain/consolidate are bit-exact with the TS reference implementation (pi-memory v0.1.2).
+- **Shutdown UX**: exiting Pi defaults to *not* summarizing; users can opt in at quit time, and non-interactive runs skip the prompt.
 
 ## Development
 
@@ -46,7 +47,7 @@ bun test ts/test/
 
 - Project A's memories never appear in project B's recall (cross-db + scope filtering).
 - Deleting a project = deleting its directory; a corrupted db never affects other projects.
-- The embedding model is loaded once globally (~90MB, not per project); vector indexes are isolated per project.
+- The embedding model is loaded once globally (~90MB, not per project); vector indexes are isolated per project and are hydrated from the database on first open.
 
 ## Status
 
@@ -71,6 +72,8 @@ bun test ts/test/
 ## Model
 
 all-MiniLM-L6-v2 (384-dim, ~90MB ONNX): auto-downloaded in the background on first start (HF official + hf-mirror fallback); degrades to FTS-only when missing. Manual trigger: `/memory prepare-model`.
+
+Session exit defaults to *not* summarizing; on quit, Pi may ask whether to consolidate the session, and the prompt is skipped in non-interactive modes.
 
 ## Benchmark
 

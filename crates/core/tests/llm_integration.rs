@@ -2,7 +2,7 @@
 
 use pi_memory_core::embedding_runtime::{ProjectVectors, SharedEmbedder};
 use pi_memory_core::runtime::{build_recall_injection, consolidate_session_memories, retain_turn_memories};
-use pi_memory_core::storage::{Storage, TursoStorage};
+use pi_memory_core::storage::TursoStorage;
 
 fn temp_db(name: &str) -> String {
     let dir = std::env::temp_dir().join("pi-memory-rust-test");

@@ -2,7 +2,11 @@ import { test, expect } from "bun:test";
 import { MemoryRustClient } from "../src/client.ts";
 
 test("常驻进程生命周期与 JSON-RPC 链路", async () => {
-  const client = new MemoryRustClient({ binaryPath: new URL("../bin/pi-memory-server", import.meta.url).pathname });
+  const logs: string[] = [];
+  const client = new MemoryRustClient({
+    binaryPath: new URL("../bin/pi-memory-server", import.meta.url).pathname,
+    log: (line) => logs.push(line),
+  });
 
   // 启动 + 握手
   await client.ensureStarted();
@@ -16,4 +20,6 @@ test("常驻进程生命周期与 JSON-RPC 链路", async () => {
 
   // 优雅关闭
   await client.shutdown();
+  expect(logs.some((line) => line.includes("SIGKILL"))).toBe(false);
+  expect(logs.some((line) => line.includes("退出码 0"))).toBe(true);
 });

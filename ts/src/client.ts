@@ -43,11 +43,13 @@ export interface ClientOptions {
 
 export class MemoryRustClient {
   private proc: ChildProcessWithoutNullStreams | null = null;
+  private startPromise: Promise<void> | null = null;
   private nextId = 1;
-  private pending = new Map<number, { resolve: (r: RpcResponse) => void; timer: NodeJS.Timeout }>();
+  private pending = new Map<number, { resolve: (r: RpcResponse) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   private buffer = Buffer.alloc(0);
   private restartCount = 0;
   private shuttingDown = false;
+  private startingUp = false;
   private readonly options: Required<ClientOptions>;
 
   constructor(options: ClientOptions = {}) {
@@ -62,17 +64,41 @@ export class MemoryRustClient {
   /** 确保常驻进程已启动并完成版本握手 */
   async ensureStarted(): Promise<void> {
     if (this.proc && this.proc.exitCode === null) return;
-    this.startProcess();
-    const hello = await this.call("hello", { version: PROTOCOL_VERSION });
-    if (hello.error) {
-      throw new Error(`pi-memory-rust 协议握手失败: ${hello.error.message}`);
+    if (this.startPromise) {
+      await this.startPromise;
+      return;
+    }
+    this.shuttingDown = false;
+    this.startingUp = true;
+    this.startPromise = (async () => {
+      try {
+        this.startProcess();
+        const hello = await this.invoke("hello", { version: PROTOCOL_VERSION });
+        if (hello.error) {
+          throw new Error(`pi-memory-rust 协议握手失败: ${hello.error.message}`);
+        }
+      } catch (error) {
+        const proc = this.proc;
+        if (proc && proc.exitCode === null) {
+          proc.kill("SIGKILL");
+          await this.waitForExit(proc, 1000).catch(() => {});
+        }
+        throw error;
+      } finally {
+        this.startingUp = false;
+      }
+    })();
+    try {
+      await this.startPromise;
+    } finally {
+      this.startPromise = null;
     }
   }
 
   /** 通用调用：返回 result，错误（含超时/进程退出）抛异常 */
-  async call<T = unknown>(method: string, params: unknown = {}): Promise<T> {
+  async call<T = unknown>(method: string, params: unknown = {}, timeoutMs?: number): Promise<T> {
     await this.ensureStarted();
-    const response = await this.invoke(method, params);
+    const response = await this.invoke(method, params, timeoutMs);
     if (response.error) throw new Error(response.error.message);
     return response.result as T;
   }
@@ -82,21 +108,30 @@ export class MemoryRustClient {
     if (!this.proc || this.proc.exitCode !== null) {
       return { backend: "unavailable", error: "进程未启动" };
     }
-    const response = await this.invoke("diagnose", {});
-    if (response.error) return { backend: "error", error: response.error.message };
-    return (response.result ?? {}) as Record<string, unknown>;
+    try {
+      const response = await this.invoke("diagnose", {});
+      if (response.error) return { backend: "error", error: response.error.message };
+      return (response.result ?? {}) as Record<string, unknown>;
+    } catch (error) {
+      return { backend: "error", error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   /** 优雅关闭：先发 shutdown，超时则强杀 */
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
     const proc = this.proc;
-    this.proc = null;
     if (!proc || proc.exitCode !== null) return;
     try {
       await this.invoke("shutdown", {}, 1000);
+      await this.waitForExit(proc, 1000);
     } catch {
       proc.kill("SIGKILL");
+      await this.waitForExit(proc, 1000).catch(() => {});
+    } finally {
+      if (this.proc === proc) {
+        this.proc = null;
+      }
     }
   }
 
@@ -104,8 +139,10 @@ export class MemoryRustClient {
   // 内部
   // -------------------------------------------------------------------------
 
-  private startProcess(): void {
-    this.restartCount = 0;
+  private startProcess(resetRestartCount = true): void {
+    if (resetRestartCount) {
+      this.restartCount = 0;
+    }
     // 数据库路径由 Rust 侧按 projectScope 管理（单进程多库，物理隔离）
     if (!fs.existsSync(this.options.binaryPath)) {
       throw new Error(
@@ -130,15 +167,15 @@ export class MemoryRustClient {
     // 失败所有挂起请求
     for (const [, entry] of this.pending) {
       clearTimeout(entry.timer);
-      entry.resolve({ id: -1, error: { code: -32001, message: `进程退出：${reason}` } });
+      entry.reject(new Error(`进程退出：${reason}`));
     }
     this.pending.clear();
     this.proc = null;
     // 非主动关闭时自动重启（有限次）
-    if (!this.shuttingDown && this.restartCount < this.options.maxRestarts) {
+    if (!this.shuttingDown && !this.startingUp && this.restartCount < this.options.maxRestarts) {
       this.restartCount += 1;
       this.options.log(`自动重启（第 ${this.restartCount} 次）`);
-      this.startProcess();
+      this.startProcess(false);
     }
   }
 
@@ -170,14 +207,18 @@ export class MemoryRustClient {
     }
     const id = this.nextId++;
     const timer = setTimeout(() => {
-      this.pending.delete(id);
+      const entry = this.pending.get(id);
+      if (entry) {
+        this.pending.delete(id);
+        entry.reject(new Error(`调用超时：${method}`));
+      }
       // 超时视为进程无响应，按崩溃处理以便重启
       proc.kill("SIGKILL");
       // 上面 kill 会触发 exit → 失败该请求，这里兜底避免悬挂
     }, timeoutMs ?? this.options.callTimeoutMs);
     timer.unref();
-    const promise = new Promise<RpcResponse>((resolve) => {
-      this.pending.set(id, { resolve, timer });
+    const promise = new Promise<RpcResponse>((resolve, reject) => {
+      this.pending.set(id, { resolve, reject, timer });
     });
     const payload = JSON.stringify({ id, method, params });
     const frame = Buffer.alloc(4 + Buffer.byteLength(payload));
@@ -185,6 +226,38 @@ export class MemoryRustClient {
     frame.write(payload, 4, "utf8");
     proc.stdin.write(frame);
     return promise;
+  }
+
+  private waitForExit(proc: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<void> {
+    if (proc.exitCode !== null) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new Error("等待进程退出超时"));
+      }, timeoutMs);
+      timer.unref();
+
+      const onExit = () => {
+        cleanup();
+        resolve();
+      };
+
+      const onError = (error: Error) => {
+        cleanup();
+        reject(error);
+      };
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        proc.off("exit", onExit);
+        proc.off("error", onError);
+      };
+
+      proc.once("exit", onExit);
+      proc.once("error", onError);
+    });
   }
 }
 

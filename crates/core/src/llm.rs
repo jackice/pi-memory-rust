@@ -82,6 +82,6 @@ pub fn parse_llm_extraction(payload: &str) -> LlmExtractionResult {
 fn parse_list<T>(root: &serde_json::Value, key: &str, parse: impl Fn(&serde_json::Value) -> T) -> Vec<T> {
     root.get(key)
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().map(|item| parse(item)).collect())
+        .map(|arr| arr.iter().map(parse).collect())
         .unwrap_or_default()
 }
