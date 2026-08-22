@@ -145,8 +145,14 @@ impl TursoStorage {
     fn open_once(path: &str) -> anyhow::Result<Self> {
         let io = Database::io_for_path(path)?;
         // The Tantivy FTS index (USING fts) is an experimental index method and must be enabled explicitly.
-        // multiprocess WAL lifts the exclusive file lock so multiple pi sessions can share one project DB.
-        let opts = DatabaseOpts::new().with_index_method(true).with_multiprocess_wal(true);
+        // libSQL's experimental multiprocess WAL (which lifts the exclusive file lock so multiple pi
+        // sessions can share one project DB) is OFF by default: it can panic on large transactions
+        // ("shared WAL frame ids must increase monotonically"). Enable explicitly with
+        // PI_MEMORY_MULTIPROCESS=1 and accept the experimental risk; busy_timeout applies in both modes.
+        let enable_multiprocess_wal = std::env::var("PI_MEMORY_MULTIPROCESS").is_ok();
+        let opts = DatabaseOpts::new()
+            .with_index_method(true)
+            .with_multiprocess_wal(enable_multiprocess_wal);
         let db = Database::open_file_with_flags(io, path, OpenFlags::default(), opts, None)?;
         let conn = db.connect()?;
         let storage = Self { conn, path: path.to_string() };

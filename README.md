@@ -48,9 +48,13 @@ bun test ts/test/
 - Project A's memories never appear in project B's recall (cross-db + scope filtering).
 - Deleting a project = deleting its directory; a corrupted db never affects other projects.
 - The embedding model is loaded once globally (~90MB, not per project); vector indexes are isolated per project and are hydrated from the database on first open.
-- **Multiple pi sessions can share one project DB**: databases open in multiprocess WAL mode with a
-  3s busy timeout, so concurrent retain/consolidate across sessions waits briefly instead of failing;
-  a brand-new DB opened by two processes at the exact same instant is retried transparently.
+- **Single-session stability is the default**: databases open in WAL mode with a 3s busy timeout
+  (harmless for one process). A second pi session touching the same project DB fails fast with a
+  clear "locked by another process" error and degrades gracefully.
+- **Experimental multi-session sharing (opt-in)**: set `PI_MEMORY_MULTIPROCESS=1` to lift the
+  exclusive file lock so multiple sessions can share one project DB. This uses libSQL's experimental
+  multiprocess WAL, which can panic on very large transactions ("shared WAL frame ids must increase
+  monotonically") — enable only if you accept that risk.
 
 ## Status
 
