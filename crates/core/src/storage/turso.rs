@@ -1,9 +1,9 @@
-//! turso_core 文件存储实现（M1-T2）。
+//! turso_core file storage implementation (M1-T2).
 //!
-//! 表结构移植自 TS 版 `schema.ts`；CRUD 语义与 TS 版 `store.ts` 一致
-//! （upsert 用 ON CONFLICT DO UPDATE）。FTS 使用 Turso Tantivy 语法：
-//! `CREATE INDEX ... USING fts` 挂在现有表上，索引自动维护（插入场景已由测试验证，
-//! 更新场景同步行为见 `tests/turso_storage.rs::turso_fts_update_sync`）。
+//! Table schemas are ported from the TS `schema.ts`; CRUD semantics match the TS `store.ts`
+//! (upsert via ON CONFLICT DO UPDATE). FTS uses Turso Tantivy syntax:
+//! `CREATE INDEX ... USING fts` attaches to existing tables and is maintained automatically (inserts are covered by tests;
+//! the update sync behavior is covered by `tests/turso_storage.rs::turso_fts_update_sync`).
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use crate::models::{
 
 use super::Storage;
 
-/// 表结构 SQL（与 TS 版 schema.ts 保持一致）。
+/// Table schema SQL (kept aligned with the TS schema.ts).
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS working_memory (
     id TEXT PRIMARY KEY,
@@ -111,17 +111,17 @@ CREATE TABLE IF NOT EXISTS session_state (
 );
 "#;
 
-/// turso_core 文件存储。
+/// turso_core file storage.
 pub struct TursoStorage {
     conn: Arc<Connection>,
     path: String,
 }
 
 impl TursoStorage {
-    /// 打开（或创建）本地数据库文件并初始化 schema。
+    /// Open (or create) a local database file and initialize the schema.
     pub fn open(path: &str) -> anyhow::Result<Self> {
         let io = Database::io_for_path(path)?;
-        // Tantivy FTS 索引（USING fts）属 experimental index method，需显式开启
+        // The Tantivy FTS index (USING fts) is an experimental index method and must be enabled explicitly
         let opts = DatabaseOpts::new().with_index_method(true);
         let db = Database::open_file_with_flags(io, path, OpenFlags::default(), opts, None)?;
         let conn = db.connect()?;
@@ -130,12 +130,12 @@ impl TursoStorage {
         Ok(storage)
     }
 
-    /// 初始化 schema（幂等）。
+    /// Initialize the schema (idempotent).
     fn init(&self) -> anyhow::Result<()> {
         self.conn.prepare_execute_batch(SCHEMA_SQL)?;
-        // 旧库迁移：结构化表补 project_scope 列（新库建表已含；幂等）
+        // Legacy migration: add project_scope to structured tables (new DBs already have it; idempotent)
         self.ensure_structured_scope_columns()?;
-        // Tantivy FTS 索引挂在现有表上（Turso 语法，非 SQLite FTS5 虚拟表）
+        // Tantivy FTS index attaches to existing tables (Turso syntax, not an SQLite FTS5 virtual table)
         self.conn.prepare_execute_batch(
             "CREATE INDEX IF NOT EXISTS fts_working_idx ON working_memory USING fts (content)",
         )?;
@@ -145,7 +145,7 @@ impl TursoStorage {
         Ok(())
     }
 
-    /// 旧库迁移：facts/preferences/instructions/timeline 补 project_scope 列（幂等）。
+    /// Legacy migration: add the project_scope column to facts/preferences/instructions/timeline (idempotent).
     fn ensure_structured_scope_columns(&self) -> anyhow::Result<()> {
         for table in ["facts", "preferences", "instructions", "timeline"] {
             let sql = format!("PRAGMA table_info({table})");
@@ -166,7 +166,7 @@ impl TursoStorage {
     // working_memory
     // -----------------------------------------------------------------------
 
-    /// 插入或更新（upsert，与 TS 版 insertWorkingMemory 语义一致）。
+    /// Insert or update (upsert, matching the TS insertWorkingMemory semantics).
     pub fn insert_working(&self, record: &WorkingMemoryRecord) -> anyhow::Result<()> {
         let mut stmt = self.conn.prepare(
             "INSERT INTO working_memory (
@@ -206,7 +206,7 @@ impl TursoStorage {
         Ok(())
     }
 
-    /// 按 id 查询 working memory。
+    /// Query a working memory by id.
     pub fn get_working(&self, id: &str) -> anyhow::Result<Option<WorkingMemoryRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, content, embed_text, source, session_id, project_scope,
@@ -218,7 +218,7 @@ impl TursoStorage {
         collect_first_row(&mut stmt, working_from_row)
     }
 
-    /// 按 id 查询 episodic memory。
+    /// Query an episodic memory by id.
     pub fn get_episodic(&self, id: &str) -> anyhow::Result<Option<EpisodicMemoryRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, content, summary_of, session_id, project_scope,
@@ -230,26 +230,26 @@ impl TursoStorage {
         collect_first_row(&mut stmt, episodic_from_row)
     }
 
-    /// 开启事务（批量写入性能：Tantivy FTS 索引在 COMMIT 时一次性更新）。
+    /// Begin a transaction (bulk-write performance: the Tantivy FTS index updates once at COMMIT).
     pub fn begin_tx(&self) -> anyhow::Result<()> {
         self.conn.execute("BEGIN")?;
         Ok(())
     }
 
-    /// 提交事务。
+    /// Commit the transaction.
     pub fn commit_tx(&self) -> anyhow::Result<()> {
         self.conn.execute("COMMIT")?;
         Ok(())
     }
 
-    /// 从旧 pi-memory SQLite 库迁移数据（M3 迁移工具）。
-    /// 旧库由 turso_core 直读（SQLite 文件格式兼容）；FTS5 虚拟表忽略（新库 Tantivy 索引自动重建）。
-    /// 性能：迁移前 drop FTS 索引（避免逐条 commit 非线性恶化），完成后一次性重建。
+    /// Migrate data from a legacy pi-memory SQLite database (M3 migration tool).
+    /// The legacy DB is read directly by turso_core (SQLite file compatible); FTS5 virtual tables are ignored (the new Tantivy index rebuilds automatically).
+    /// Performance: drop the FTS index before migrating (per-row commits degrade nonlinearly), then rebuild once at the end.
     pub fn migrate_from(&self, source_path: &str) -> anyhow::Result<serde_json::Value> {
         let source = TursoStorage::open(source_path)?;
         let mut stats = serde_json::Map::new();
 
-        // 批量导入阶段：先摘除 FTS 索引（Tantivy 逐条 commit 随规模非线性恶化）
+        // Bulk import phase: drop the FTS index first (per-row Tantivy commits degrade nonlinearly with size)
         self.drop_fts()?;
         self.begin_tx()?;
 
@@ -281,7 +281,7 @@ impl TursoStorage {
         self.insert_timeline_events(&timeline)?;
         stats.insert("timeline".into(), serde_json::json!(timeline.len()));
 
-        // embeddings（向量直接迁移，模型信息保留）
+        // embeddings (vectors migrate directly; model metadata preserved)
         let embeddings = source.list_all_embeddings()?;
         let embedding_count = embeddings.len();
         for embedding in &embeddings {
@@ -290,13 +290,13 @@ impl TursoStorage {
         stats.insert("embeddings".into(), serde_json::json!(embedding_count));
 
         self.commit_tx()?;
-        // 重建 FTS 索引（迁移数据后一次性全量建索引）
+        // Rebuild the FTS index (one full build after migration)
         self.rebuild_fts()?;
 
         Ok(serde_json::Value::Object(stats))
     }
 
-    /// 列出全部 working memories（迁移用）。
+    /// List all working memories (for migration).
     pub fn list_all_working(&self) -> anyhow::Result<Vec<WorkingMemoryRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, content, embed_text, source, session_id, project_scope,\n                    importance, memory_type, metadata_json, created_at, updated_at,\n                    consolidated_at, valid_until, superseded_by\n             FROM working_memory",
@@ -405,7 +405,7 @@ impl TursoStorage {
         })
     }
 
-    /// 按项目列出 working memories（created_at DESC）。
+    /// List working memories for a project (created_at DESC).
     pub fn list_working_by_project(&self, project_scope: &str) -> anyhow::Result<Vec<WorkingMemoryRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, content, embed_text, source, session_id, project_scope,
@@ -417,7 +417,7 @@ impl TursoStorage {
         collect_rows(&mut stmt, working_from_row)
     }
 
-    /// Tantivy FTS 搜索 working memories（对应 TS 版 searchWorkingMemory：MATCH + scope 过滤 + 分数排序）。
+    /// Tantivy FTS search over working memories (matches the TS searchWorkingMemory: MATCH + scope filter + score sort).
     pub fn search_working_fts(
         &self,
         query: &str,
@@ -437,7 +437,7 @@ impl TursoStorage {
         collect_rows_with_score(&mut stmt, working_from_row)
     }
 
-    /// 统计 working_memory 条数。
+    /// Count working_memory rows.
     pub fn count_working(&self) -> anyhow::Result<i64> {
         count_rows(&self.conn, "working_memory")
     }
@@ -446,7 +446,7 @@ impl TursoStorage {
     // episodic_memory
     // -----------------------------------------------------------------------
 
-    /// 插入或更新 episodic memory。
+    /// Insert or update an episodic memory.
     pub fn insert_episodic(&self, record: &EpisodicMemoryRecord) -> anyhow::Result<()> {
         let mut stmt = self.conn.prepare(
             "INSERT INTO episodic_memory (
@@ -486,7 +486,7 @@ impl TursoStorage {
         Ok(())
     }
 
-    /// 按项目列出 episodic memories（created_at DESC）。
+    /// List episodic memories for a project (created_at DESC).
     pub fn list_episodic_by_project(&self, project_scope: &str) -> anyhow::Result<Vec<EpisodicMemoryRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, content, summary_of, session_id, project_scope,
@@ -498,7 +498,7 @@ impl TursoStorage {
         collect_rows(&mut stmt, episodic_from_row)
     }
 
-    /// Tantivy FTS 搜索 episodic memories。
+    /// Tantivy FTS search over episodic memories.
     pub fn search_episodic_fts(
         &self,
         query: &str,
@@ -518,7 +518,7 @@ impl TursoStorage {
         collect_rows_with_score(&mut stmt, episodic_from_row)
     }
 
-    /// 统计 episodic_memory 条数。
+    /// Count episodic_memory rows.
     pub fn count_episodic(&self) -> anyhow::Result<i64> {
         count_rows(&self.conn, "episodic_memory")
     }
@@ -632,7 +632,7 @@ impl TursoStorage {
         Ok(())
     }
 
-    /// 按项目统计 working/episodic 条数（stats 命令用）。
+    /// Count working/episodic rows per project (used by the stats command).
     pub fn count_working_by_project(&self, project_scope: &str) -> anyhow::Result<i64> {
         count_rows_where(&self.conn, "working_memory", "project_scope", project_scope)
     }
@@ -645,13 +645,13 @@ impl TursoStorage {
         count_rows_where(&self.conn, "episodic_memory", "session_id", session_id)
     }
 
-    /// 数据库文件路径（diagnose 用）。
+    /// Database file path (for diagnose).
     pub fn db_path(&self) -> &str {
         &self.path
     }
 
-    /// 结构化表 LIKE 搜索（queryStructuredCandidates 对应）。
-    /// project_scope 过滤：空串/旧库未标记数据兼容可见（项目隔离对新写入数据生效）。
+    /// LIKE search over structured tables (matches queryStructuredCandidates).
+    /// project_scope filter: empty/legacy-unmarked rows stay visible for compatibility (isolation applies to newly written data).
     pub fn search_facts_like(&self, query: &str, project_scope: &str) -> anyhow::Result<Vec<FactRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT fact_id, subject, predicate, object, confidence, source_memory_id, session_id, project_scope, timestamp
@@ -742,7 +742,7 @@ impl TursoStorage {
         })
     }
 
-    /// 按 session 列出结构化记忆（facts/preferences/instructions/timeline 的 count 汇总由 diagnose 使用）。
+    /// Structured memories by session (the facts/preferences/instructions/timeline count summary is used by diagnose).
     pub fn count_by_session(&self, table: &str, session_id: &str) -> anyhow::Result<i64> {
         let sql = format!("SELECT COUNT(*) FROM {table} WHERE session_id = ?1");
         let mut stmt = self.conn.prepare(&sql)?;
@@ -870,8 +870,8 @@ impl TursoStorage {
         Ok(())
     }
 
-    /// 更新 working_memory 的 consolidated_at（整合后标记）。
-    /// 注意：turso_core 的 Statement 复用存在 bind 残留风险，每条独立 prepare。
+    /// Update working_memory.consolidated_at (mark after consolidation).
+    /// Note: reusing turso_core Statements risks leftover bindings, so each statement is prepared independently.
     pub fn mark_working_consolidated(&self, ids: &[String], consolidated_at: &str) -> anyhow::Result<()> {
         for id in ids {
             let mut stmt = self
@@ -884,7 +884,7 @@ impl TursoStorage {
         Ok(())
     }
 
-    /// 按项目删除 working/episodic 记忆（clear 命令用）。
+    /// Delete working/episodic memories for a project (used by the clear command).
     pub fn clear_project_memories(&self, project_scope: &str) -> anyhow::Result<()> {
         for table in ["working_memory", "episodic_memory"] {
             let sql = format!("DELETE FROM {table} WHERE project_scope = ?1");
@@ -892,7 +892,7 @@ impl TursoStorage {
             bind_text(&mut stmt, 1, project_scope)?;
             stmt.run_ignore_rows()?;
         }
-        // 全局表清空（与 TS 版 clear 一致）
+        // Clear global tables (matches the TS clear)
         for table in [
             "memory_embeddings", "facts", "preferences", "instructions", "timeline", "session_state",
         ] {
@@ -903,17 +903,17 @@ impl TursoStorage {
     }
 
     // -----------------------------------------------------------------------
-    // FTS 重建（/memory rebuild 语义）
+    // FTS rebuild (/memory rebuild semantics)
     // -----------------------------------------------------------------------
 
-    /// 删除 FTS 索引（批量填充阶段避免逐条 commit；填充后 rebuild_fts 一次全量建索引）。
+    /// Drop the FTS index (avoids per-row commits during bulk fill; rebuild_fts rebuilds it once afterwards).
     pub fn drop_fts(&self) -> anyhow::Result<()> {
         self.conn.execute("DROP INDEX IF EXISTS fts_working_idx")?;
         self.conn.execute("DROP INDEX IF EXISTS fts_episodes_idx")?;
         Ok(())
     }
 
-    /// 重建 Tantivy FTS 索引：DROP + CREATE（幂等）。
+    /// Rebuild the Tantivy FTS index: DROP + CREATE (idempotent).
     pub fn rebuild_fts(&self) -> anyhow::Result<()> {
         self.conn.execute("DROP INDEX IF EXISTS fts_working_idx")?;
         self.conn.execute("DROP INDEX IF EXISTS fts_episodes_idx")?;
@@ -946,7 +946,7 @@ impl Storage for TursoStorage {
 }
 
 // ---------------------------------------------------------------------------
-// 行反序列化
+// Row deserialization
 // ---------------------------------------------------------------------------
 
 fn working_from_row(row: &Row) -> anyhow::Result<WorkingMemoryRecord> {
@@ -1001,10 +1001,10 @@ fn metadata_to_json(metadata: Option<&serde_json::Value>) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// 收集辅助
+// Collection helpers
 // ---------------------------------------------------------------------------
 
-/// 取单行（无行返回 None）。
+/// Fetch a single row (None when absent).
 fn collect_first_row<T>(
     stmt: &mut Statement,
     parse: fn(&Row) -> anyhow::Result<T>,
@@ -1027,7 +1027,7 @@ fn collect_first_row<T>(
     Ok(found)
 }
 
-/// 收集全部行。
+/// Collect all rows.
 fn collect_rows<T>(stmt: &mut Statement, parse: fn(&Row) -> anyhow::Result<T>) -> anyhow::Result<Vec<T>> {
     let mut results = Vec::new();
     let mut err = None;
@@ -1047,7 +1047,7 @@ fn collect_rows<T>(stmt: &mut Statement, parse: fn(&Row) -> anyhow::Result<T>) -
     Ok(results)
 }
 
-/// 收集全部行并附带第 14 列 score。
+/// Collect all rows with the score column (index 14) attached.
 fn collect_rows_with_score<T>(
     stmt: &mut Statement,
     parse: fn(&Row) -> anyhow::Result<T>,
@@ -1086,12 +1086,12 @@ fn count_rows_where(conn: &Arc<Connection>, table: &str, column: &str, value: &s
 }
 
 // ---------------------------------------------------------------------------
-// Value 绑定与取值辅助（turso_core 底层 API 的轻量封装）
+// Value binding and extraction helpers (thin wrappers over the turso_core low-level API)
 // ---------------------------------------------------------------------------
 
 fn bind_text(stmt: &mut Statement, index: usize, value: &str) -> anyhow::Result<()> {
     stmt.bind_at(
-        NonZeroUsize::new(index).expect("索引必须非零"),
+        NonZeroUsize::new(index).expect("index must be non-zero"),
         Value::Text(Text::new(value.to_string())),
     )?;
     Ok(())
@@ -1102,7 +1102,7 @@ fn bind_opt_text(stmt: &mut Statement, index: usize, value: Option<&str>) -> any
         Some(text) => bind_text(stmt, index, text),
         None => {
             stmt.bind_at(
-                NonZeroUsize::new(index).expect("索引必须非零"),
+                NonZeroUsize::new(index).expect("index must be non-zero"),
                 Value::Null,
             )?;
             Ok(())
@@ -1112,20 +1112,20 @@ fn bind_opt_text(stmt: &mut Statement, index: usize, value: Option<&str>) -> any
 
 fn bind_int(stmt: &mut Statement, index: usize, value: i64) -> anyhow::Result<()> {
     stmt.bind_at(
-        NonZeroUsize::new(index).expect("索引必须非零"),
+        NonZeroUsize::new(index).expect("index must be non-zero"),
         Value::Numeric(Numeric::Integer(value)),
     )?;
     Ok(())
 }
 
 fn bind_num(stmt: &mut Statement, index: usize, value: f64) -> anyhow::Result<()> {
-    // turso_core 的 Numeric 无 From<f64>，经 NonNan 构造；NaN 按 NULL 处理
+    // turso_core Numeric has no From<f64>; build via NonNan; NaN binds as NULL
     let numeric = match turso_core::NonNan::new(value) {
         Some(non_nan) => Numeric::Float(non_nan),
-        None => return Ok(()), // NaN 绑定为 NULL
+        None => return Ok(()), // NaN binds as NULL
     };
     stmt.bind_at(
-        NonZeroUsize::new(index).expect("索引必须非零"),
+        NonZeroUsize::new(index).expect("index must be non-zero"),
         Value::Numeric(numeric),
     )?;
     Ok(())
@@ -1177,3 +1177,4 @@ fn value_to_i64(value: &Value) -> i64 {
         _ => 0,
     }
 }
+

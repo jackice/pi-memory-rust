@@ -1,7 +1,7 @@
-//! pi-memory 常驻服务：stdio JSON-RPC 入口。
+//! pi-memory resident server: stdio JSON-RPC entry point.
 //!
-//! 单进程多库：按 projectScope 打开独立数据库文件（物理隔离），
-//! Embedder 全局共享（模型只加载一份），向量索引按项目独立。
+//! Single process, multiple databases: one DB file per projectScope (physical isolation),
+//! a single globally shared Embedder (the model is loaded once), and a per-project vector index.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -15,13 +15,13 @@ use pi_memory_core::protocol::{
 };
 use pi_memory_core::storage::{Storage, TursoStorage};
 
-/// 项目运行时单元：存储 + 向量（按 scope 独立）。
+/// Per-project runtime unit: storage + vectors (isolated per scope).
 struct ProjectRuntime {
     storage: TursoStorage,
     vectors: ProjectVectors,
 }
 
-/// 项目运行时池（单线程串行访问）。
+/// Pool of project runtimes (accessed serially from a single thread).
 struct StoragePool {
     data_dir: PathBuf,
     projects: HashMap<String, ProjectRuntime>,
@@ -35,20 +35,20 @@ impl StoragePool {
         }
     }
 
-    /// 获取（或首次打开）某项目的运行时。
+    /// Get (or lazily open) the runtime for a project.
     fn get_or_open(&mut self, project_scope: &str) -> anyhow::Result<&mut ProjectRuntime> {
         if !self.projects.contains_key(project_scope) {
             let db_path = paths::ensure_project_db_dir(&self.data_dir, project_scope)?;
-            let storage = TursoStorage::open(db_path.to_str().expect("路径必须为 UTF-8"))?;
+            let storage = TursoStorage::open(db_path.to_str().expect("path must be UTF-8"))?;
             let mut vectors = ProjectVectors::new()?;
             vectors.hydrate(&storage)?;
-            pi_memory_core::debug_log(&format!("打开项目库: {db_path:?}"));
+            pi_memory_core::debug_log(&format!("opened project db: {db_path:?}"));
             self.projects.insert(project_scope.to_string(), ProjectRuntime { storage, vectors });
         }
-        Ok(self.projects.get_mut(project_scope).expect("刚插入必有"))
+        Ok(self.projects.get_mut(project_scope).expect("just inserted"))
     }
 
-    /// 已打开的项目数（诊断用）。
+    /// Number of open projects (diagnostics).
     fn open_project_count(&self) -> usize {
         self.projects.len()
     }
@@ -59,18 +59,19 @@ fn main() {
     let mut pool = StoragePool::new();
 
     if !shared.model_ready() {
-        // 模型未就绪：后台线程下载（不阻塞 RPC 主循环），或 /memory prepare-model 手动触发
+        // Model not ready: download in a background thread (does not block the RPC loop),
+        // or trigger manually via /memory prepare-model
         let model_dir = pi_memory_core::embedding_runtime::default_model_dir();
         let shared_for_download = shared.clone();
         std::thread::spawn(move || {
             match pi_memory_core::model_download::ensure_model_dir(&model_dir) {
                 Ok(()) => {
-                    pi_memory_core::debug_log(&format!("模型后台下载完成: {}", model_dir.display()));
+                    pi_memory_core::debug_log(&format!("model downloaded in background: {}", model_dir.display()));
                     shared_for_download.warmup();
                 }
                 Err(e) => {
                     pi_memory_core::debug_log(&format!(
-                        "模型后台下载失败（可稍后 /memory prepare-model 重试）: {e}"
+                        "background model download failed (retry later via /memory prepare-model): {e}"
                     ))
                 }
             }
@@ -91,35 +92,36 @@ fn serve(pool: &mut StoragePool, shared: &SharedEmbedder) {
     loop {
         let frame = match read_frame(&mut reader) {
             Ok(Some(f)) => f,
-            Ok(None) => break, // stdin EOF：宿主已关闭
+            Ok(None) => break, // stdin EOF: host closed
             Err(e) => {
-                eprintln!("[pi-memory-rust] 读取失败: {e}");
+                eprintln!("[pi-memory-rust] read failed: {e}");
                 break;
             }
         };
         let request: RpcRequest = match serde_json::from_str(&frame) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("[pi-memory-rust] 请求解析失败: {e}");
+                eprintln!("[pi-memory-rust] request parse failed: {e}");
                 continue;
             }
         };
         let shutdown = request.method == methods::SHUTDOWN;
         let payload = handle_request(&request, pool, shared);
         if let Err(e) = write_frame(&mut writer, &payload.to_string()) {
-            eprintln!("[pi-memory-rust] 写入失败: {e}");
+            eprintln!("[pi-memory-rust] write failed: {e}");
             break;
         }
         if shutdown {
-            // 限时等待后台模型加载线程结束再退出（避免进程退出与 ONNX 全局初始化并发 SIGSEGV），
-            // 超时放弃：仅刚启动即退出的罕见场景，不拖慢正常关闭
+            // Bounded wait for the background model load before exiting (avoids SIGSEGV from
+            // racing ONNX global init); give up on timeout — only happens when exiting right
+            // after startup, so normal shutdown stays fast
             shared.wait_loading(std::time::Duration::from_millis(800));
             break;
         }
     }
 }
 
-/// 处理单个请求，返回响应 JSON
+/// Handle a single request and return the response JSON
 fn handle_request(request: &RpcRequest, pool: &mut StoragePool, shared: &SharedEmbedder) -> serde_json::Value {
     let response = match request.method.as_str() {
         methods::HELLO => {
@@ -129,16 +131,16 @@ fn handle_request(request: &RpcRequest, pool: &mut StoragePool, shared: &SharedE
                     return serde_json::to_value(RpcResponse::err(
                         request.id,
                         codes::INVALID_PARAMS,
-                        "hello 参数无效",
+                        "invalid hello params",
                     ))
-                    .expect("序列化不会失败")
+                    .expect("serialization cannot fail")
                 }
             };
             if params.version != PROTOCOL_VERSION {
                 RpcResponse::err(
                     request.id,
                     codes::VERSION_MISMATCH,
-                    format!("协议版本不匹配：客户端 {}，服务端 {}", params.version, PROTOCOL_VERSION),
+                    format!("protocol version mismatch: client {}, server {}", params.version, PROTOCOL_VERSION),
                 )
             } else {
                 RpcResponse::ok(
@@ -147,12 +149,12 @@ fn handle_request(request: &RpcRequest, pool: &mut StoragePool, shared: &SharedE
                         version: PROTOCOL_VERSION,
                         name: "pi-memory-rust".into(),
                     })
-                    .expect("序列化不会失败"),
+                    .expect("serialization cannot fail"),
                 )
             }
         }
         methods::DIAGNOSE => {
-            // 诊断当前项目（可选 projectScope 参数）
+            // Diagnose the current project (optional projectScope param)
             let scope = request
                 .params
                 .get("projectScope")
@@ -187,7 +189,7 @@ fn handle_request(request: &RpcRequest, pool: &mut StoragePool, shared: &SharedE
                     },
                     Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
                 },
-                Err(_) => RpcResponse::err(request.id, codes::INVALID_PARAMS, "buildRecallInjection 参数无效"),
+                Err(_) => RpcResponse::err(request.id, codes::INVALID_PARAMS, "invalid buildRecallInjection params"),
             }
         }
         methods::RETAIN_TURN_MEMORIES => {
@@ -208,7 +210,7 @@ fn handle_request(request: &RpcRequest, pool: &mut StoragePool, shared: &SharedE
                     },
                     Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
                 },
-                Err(_) => RpcResponse::err(request.id, codes::INVALID_PARAMS, "retainTurnMemories 参数无效"),
+                Err(_) => RpcResponse::err(request.id, codes::INVALID_PARAMS, "invalid retainTurnMemories params"),
             }
         }
         methods::CONSOLIDATE_SESSION_MEMORIES => {
@@ -223,14 +225,14 @@ fn handle_request(request: &RpcRequest, pool: &mut StoragePool, shared: &SharedE
                     ) {
                         Ok(result) => RpcResponse::ok(
                             request.id,
-                            serde_json::to_value(result).expect("序列化不会失败"),
+                            serde_json::to_value(result).expect("serialization cannot fail"),
                         ),
                         Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
                     },
                     Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
                 },
                 Err(_) => {
-                    RpcResponse::err(request.id, codes::INVALID_PARAMS, "consolidateSessionMemories 参数无效")
+                    RpcResponse::err(request.id, codes::INVALID_PARAMS, "invalid consolidateSessionMemories params")
                 }
             }
         }
@@ -245,7 +247,7 @@ fn handle_request(request: &RpcRequest, pool: &mut StoragePool, shared: &SharedE
                     }
                     Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
                 },
-                Err(_) => RpcResponse::err(request.id, codes::INVALID_PARAMS, "consolidateSource 参数无效"),
+                Err(_) => RpcResponse::err(request.id, codes::INVALID_PARAMS, "invalid consolidateSource params"),
             }
         }
         methods::MEMORY_COMMAND => {
@@ -262,7 +264,8 @@ fn handle_request(request: &RpcRequest, pool: &mut StoragePool, shared: &SharedE
                         );
                         match result {
                             Ok(text) => {
-                                // clear 只清 DB；重建内存向量索引，避免后续 recall 注入已删除记忆
+                                // clear only wipes the DB; rebuild the in-memory vector index so
+                                // recall never injects deleted memories
                                 if params.sub == "clear" {
                                     match ProjectVectors::new() {
                                         Ok(vectors) => runtime.vectors = vectors,
@@ -270,9 +273,9 @@ fn handle_request(request: &RpcRequest, pool: &mut StoragePool, shared: &SharedE
                                             return serde_json::to_value(RpcResponse::err(
                                                 request.id,
                                                 codes::INTERNAL_ERROR,
-                                                format!("重建向量索引失败: {e}"),
+                                                format!("failed to rebuild vector index: {e}"),
                                             ))
-                                            .expect("序列化不会失败")
+                                            .expect("serialization cannot fail")
                                         }
                                     }
                                 }
@@ -283,7 +286,7 @@ fn handle_request(request: &RpcRequest, pool: &mut StoragePool, shared: &SharedE
                     }
                     Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
                 },
-                Err(_) => RpcResponse::err(request.id, codes::INVALID_PARAMS, "memoryCommand 参数无效"),
+                Err(_) => RpcResponse::err(request.id, codes::INVALID_PARAMS, "invalid memoryCommand params"),
             }
         }
         methods::MIGRATE => {
@@ -291,13 +294,13 @@ fn handle_request(request: &RpcRequest, pool: &mut StoragePool, shared: &SharedE
                 Ok(params) => match pool.get_or_open(&params.project_scope) {
                     Ok(runtime) => match runtime.storage.migrate_from(&params.source_path) {
                         Ok(stats) => {
-                            RpcResponse::ok(request.id, serde_json::to_value(stats).expect("序列化不会失败"))
+                            RpcResponse::ok(request.id, serde_json::to_value(stats).expect("serialization cannot fail"))
                         }
                         Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
                     },
                     Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
                 },
-                Err(_) => RpcResponse::err(request.id, codes::INVALID_PARAMS, "migrate 参数无效"),
+                Err(_) => RpcResponse::err(request.id, codes::INVALID_PARAMS, "invalid migrate params"),
             }
         }
         methods::PREPARE_MODEL => {
@@ -305,7 +308,7 @@ fn handle_request(request: &RpcRequest, pool: &mut StoragePool, shared: &SharedE
             match pi_memory_core::model_download::ensure_model_dir(&model_dir) {
                 Ok(()) => {
                     shared.warmup();
-                    RpcResponse::ok(request.id, serde_json::json!("模型就绪"))
+                    RpcResponse::ok(request.id, serde_json::json!("model ready"))
                 }
                 Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
             }
@@ -318,16 +321,16 @@ fn handle_request(request: &RpcRequest, pool: &mut StoragePool, shared: &SharedE
             }),
         ),
         methods::SHUTDOWN => {
-            // 由主循环在响应后退出
+            // The main loop exits after responding
             RpcResponse::ok(request.id, serde_json::json!({ "bye": true }))
         }
-        _ => RpcResponse::err(request.id, codes::METHOD_NOT_FOUND, "未知方法"),
+        _ => RpcResponse::err(request.id, codes::METHOD_NOT_FOUND, "unknown method"),
     };
-    serde_json::to_value(response).expect("序列化不会失败")
+    serde_json::to_value(response).expect("serialization cannot fail")
 }
 
 // ---------------------------------------------------------------------------
-// RPC 参数类型
+// RPC param types
 // ---------------------------------------------------------------------------
 
 #[derive(serde::Deserialize)]
@@ -384,10 +387,10 @@ struct MemoryCommandParams {
 }
 
 // ---------------------------------------------------------------------------
-// 帧协议
+// Frame protocol
 // ---------------------------------------------------------------------------
 
-/// 单次读取一帧：`<u32 大端长度><JSON>`
+/// Read a single frame: `<u32 big-endian length><JSON>`
 fn read_frame(reader: &mut impl BufRead) -> std::io::Result<Option<String>> {
     let mut len_buf = [0u8; 4];
     match reader.read_exact(&mut len_buf) {
@@ -397,23 +400,23 @@ fn read_frame(reader: &mut impl BufRead) -> std::io::Result<Option<String>> {
     }
     let len = u32::from_be_bytes(len_buf) as usize;
     if len > 16 * 1024 * 1024 {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "帧过大"));
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "frame too large"));
     }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
     Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
 }
 
-/// 写一帧
+/// Write a frame
 fn write_frame(writer: &mut impl Write, payload: &str) -> std::io::Result<()> {
     let bytes = payload.as_bytes();
     let len = u32::try_from(bytes.len())
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "帧超长"))?;
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "frame too long"))?;
     writer.write_all(&len.to_be_bytes())?;
     writer.write_all(bytes)?;
     writer.flush()
 }
 
-// 引用 Arc 保持类型一致性（SharedEmbedder 内部已用 Arc）
+// Keep Arc referenced for type consistency (SharedEmbedder already uses Arc internally)
 #[allow(dead_code)]
 fn _keep_arc(_: &Arc<SharedEmbedder>) {}

@@ -1,8 +1,8 @@
-//! embedding 运行时组件（M2 重构）：Embedder 全局共享，向量索引按项目独立。
+//! Embedding runtime component (M2 refactor): shared global Embedder, per-project vector indexes.
 //!
-//! 多库隔离下：ONNX 模型（~90MB）全局只加载一份（Arc<Mutex>），
-//! 每个项目（projectScope）拥有独立的 VectorIndex 与 id 映射，互不串扰。
-//! RPC 主循环单线程串行，Mutex 无实际竞争。
+//! With multi-database isolation, the ONNX model (~90MB) is loaded once globally (Arc<Mutex>),
+//! and each project (projectScope) owns an independent VectorIndex and id mapping.
+//! The RPC main loop is single-threaded and serial, so the Mutex never actually contends.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,7 +14,7 @@ use crate::models::{MemoryEmbeddingRecord, MemoryKind};
 use crate::storage::TursoStorage;
 use crate::vector_index::VectorIndex;
 
-/// 模型默认缓存目录（PI_MEMORY_MODEL_PATH 优先）。
+/// Default model cache directory (PI_MEMORY_MODEL_PATH takes precedence).
 pub fn default_model_dir() -> PathBuf {
     if let Ok(path) = std::env::var("PI_MEMORY_MODEL_PATH") {
         return PathBuf::from(path);
@@ -32,11 +32,11 @@ enum EmbedderState {
     Failed,
 }
 
-/// 全局共享的 Embedder 句柄（模型只加载一份）。
+/// Global shared Embedder handle (the model is loaded exactly once).
 #[derive(Clone)]
 pub struct SharedEmbedder {
     inner: Arc<Mutex<EmbedderState>>,
-    /// 后台 warmup 加载完成通知（进程退出前限时等待，避免与 ONNX 全局初始化竞态）。
+    /// Completion signal for background warmup loads (bounded wait before exit avoids racing ONNX global init).
     loading_done: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
     model_dir: PathBuf,
 }
@@ -56,19 +56,20 @@ impl SharedEmbedder {
         }
     }
 
-    /// 模型目录是否完整。
+    /// Whether the model directory is complete.
     pub fn model_ready(&self) -> bool {
         crate::model_download::model_dir_complete(&self.model_dir)
     }
 
-    /// 后台预热模型；未就绪、已有加载任务或加载失败（Failed 可在文件修复后重试）时立即返回。
+    /// Warm up the model in the background; returns immediately when not ready, a load is
+    /// already in flight, or the model is Failed (retried once files are repaired).
     pub fn warmup(&self) {
         if !self.model_ready() {
             return;
         }
         let should_start = {
-            let mut state = self.inner.lock().expect("锁中毒");
-            // Unloaded 与 Failed 都允许启动：Failed 是临时态，模型文件修复后可重试恢复
+            let mut state = self.inner.lock().expect("mutex poisoned");
+            // Both Unloaded and Failed may start: Failed is transient and retried after repair
             if matches!(*state, EmbedderState::Unloaded | EmbedderState::Failed) {
                 *state = EmbedderState::Loading;
                 true
@@ -81,19 +82,19 @@ impl SharedEmbedder {
         }
         let inner = Arc::clone(&self.inner);
         let model_dir = self.model_dir.clone();
-        // 完成通知：状态落定后 send，进程退出前可据此限时等待，避免强杀 ONNX 初始化线程
+        // Signal completion after the state is settled so the process can wait before exit
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let loaded = Embedder::load(&model_dir);
-            let mut state = inner.lock().expect("锁中毒");
+            let mut state = inner.lock().expect("mutex poisoned");
             match loaded {
                 Ok(embedder) => {
-                    crate::debug_log(&format!("embedding 模型加载成功: {}", model_dir.display()));
+                    crate::debug_log(&format!("embedding model loaded: {}", model_dir.display()));
                     *state = EmbedderState::Ready(embedder);
                 }
                 Err(error) => {
                     crate::debug_log(&format!(
-                        "embedding 模型加载失败（降级 FTS-only）: {error}\n  model_dir: {}",
+                        "embedding model load failed (falling back to FTS-only): {error}\n  model_dir: {}",
                         model_dir.display()
                     ));
                     *state = EmbedderState::Failed;
@@ -101,26 +102,28 @@ impl SharedEmbedder {
             }
             let _ = tx.send(());
         });
-        *self.loading_done.lock().expect("锁中毒") = Some(rx);
+        *self.loading_done.lock().expect("mutex poisoned") = Some(rx);
     }
 
-    /// 限时等待后台 warmup 加载线程结束；超时放弃（仅刚启动即退出的罕见场景）。
+    /// Wait (bounded) for the background warmup load to finish; give up on timeout
+    /// (only happens when the process exits right after startup).
     pub fn wait_loading(&self, timeout: Duration) {
-        let rx = self.loading_done.lock().expect("锁中毒").take();
+        let rx = self.loading_done.lock().expect("mutex poisoned").take();
         if let Some(rx) = rx {
             let _ = rx.recv_timeout(timeout);
         }
     }
 
-    /// 确保已加载；后台加载进行中时立即返回 false，让调用方走 FTS-only。
+    /// Ensure the model is loaded; returns false immediately while a background load is in
+    /// flight so callers fall back to FTS-only.
     pub fn ensure_loaded(&self) -> bool {
         let should_load = {
-            let mut state = self.inner.lock().expect("锁中毒");
+            let mut state = self.inner.lock().expect("mutex poisoned");
             match &*state {
                 EmbedderState::Ready(_) => return true,
-                // 后台加载进行中：不重复加载，调用方降级 FTS-only
+                // Background load in flight: do not start another one, caller degrades to FTS-only
                 EmbedderState::Loading => return false,
-                // Failed 视为可重试：模型文件修复后允许同步重新加载
+                // Failed is retryable: reload synchronously once the files are repaired
                 EmbedderState::Unloaded | EmbedderState::Failed => {
                     if !self.model_ready() {
                         return false;
@@ -134,16 +137,16 @@ impl SharedEmbedder {
             return false;
         }
         let loaded = Embedder::load(&self.model_dir);
-        let mut state = self.inner.lock().expect("锁中毒");
+        let mut state = self.inner.lock().expect("mutex poisoned");
         match loaded {
             Ok(embedder) => {
-                crate::debug_log(&format!("embedding 模型加载成功: {}", self.model_dir.display()));
+                crate::debug_log(&format!("embedding model loaded: {}", self.model_dir.display()));
                 *state = EmbedderState::Ready(embedder);
                 true
             }
             Err(error) => {
                 crate::debug_log(&format!(
-                    "embedding 模型加载失败（降级 FTS-only）: {error}\n  model_dir: {}",
+                    "embedding model load failed (falling back to FTS-only): {error}\n  model_dir: {}",
                     self.model_dir.display()
                 ));
                 *state = EmbedderState::Failed;
@@ -152,23 +155,23 @@ impl SharedEmbedder {
         }
     }
 
-    /// 状态描述（诊断用）。
+    /// Status description (for diagnostics).
     pub fn status(&self) -> String {
-        let state = self.inner.lock().expect("锁中毒");
+        let state = self.inner.lock().expect("mutex poisoned");
         match &*state {
             EmbedderState::Ready(_) => "on".into(),
             EmbedderState::Loading => "loading".into(),
             EmbedderState::Failed if self.model_ready() => "model-error".into(),
-            _ => "off (模型未就绪)".into(),
+            _ => "off (model not ready)".into(),
         }
     }
 
-    /// 编码一批文本；模型加载中或不可用时返回 None → 调用方降级。
+    /// Encode a batch of texts; returns None while loading or unavailable → caller degrades.
     pub fn embed(&self, texts: &[String]) -> Option<Vec<Vec<f32>>> {
         if !self.ensure_loaded() {
             return None;
         }
-        let mut state = self.inner.lock().expect("锁中毒");
+        let mut state = self.inner.lock().expect("mutex poisoned");
         let EmbedderState::Ready(embedder) = &mut *state else {
             return None;
         };
@@ -176,7 +179,7 @@ impl SharedEmbedder {
     }
 }
 
-/// embedding 候选（对应 TS 版 buildEmbeddingCandidates 的返回元素）。
+/// Embedding candidate (matches the element returned by the TS buildEmbeddingCandidates).
 #[derive(Debug, Clone)]
 pub struct EmbeddingCandidate {
     pub memory_kind: MemoryKind,
@@ -185,14 +188,14 @@ pub struct EmbeddingCandidate {
     pub score: f64,
 }
 
-/// 项目级向量运行时：独立的 VectorIndex + id 映射（多库隔离）。
+/// Per-project vector runtime: independent VectorIndex + id mapping (multi-db isolation).
 pub struct ProjectVectors {
     index: VectorIndex,
     /// vector_id → (memory_kind, memory_id)
     id_to_memory: HashMap<u64, (MemoryKind, String)>,
     /// (kind, memory_id) → vector_id
     memory_to_id: HashMap<(MemoryKind, String), u64>,
-    /// (kind, memory_id) → content（召回注入用）
+    /// (kind, memory_id) → content (used to inject recall candidates)
     content_map: HashMap<(MemoryKind, String), String>,
 }
 
@@ -206,7 +209,7 @@ impl ProjectVectors {
         })
     }
 
-    /// 从数据库恢复向量索引。
+    /// Rebuild the vector index from the database.
     pub fn hydrate(&mut self, storage: &TursoStorage) -> anyhow::Result<()> {
         let working = storage
             .list_all_working()?
@@ -221,7 +224,8 @@ impl ProjectVectors {
         let mut vectors: Vec<Vec<f32>> = Vec::new();
         let mut ids: Vec<u64> = Vec::new();
         let mut items: Vec<(MemoryKind, String, String)> = Vec::new();
-        // 一次性取 id 起点，按实际入索引数量连续分配（不依赖迭代过程中的 next_id 读取）
+        // Take the id base once and assign consecutive ids by the actual index size
+        // (does not depend on reading next_id mid-iteration)
         let id_base = self.index.next_id_hint();
         for embedding in storage.list_all_embeddings()? {
             let content = match embedding.memory_kind {
@@ -254,7 +258,7 @@ impl ProjectVectors {
         Ok(())
     }
 
-    /// retain 路径：embed 文本并入库 + 入索引。
+    /// retain path: embed the text, persist it, and add it to the index.
     pub fn save_embedding(
         &mut self,
         storage: &TursoStorage,
@@ -264,13 +268,13 @@ impl ProjectVectors {
         text: &str,
     ) -> anyhow::Result<()> {
         let Some(embeddings) = shared.embed(&[text.to_string()]) else {
-            return Ok(()); // 模型未就绪：降级
+            return Ok(()); // model not ready: degrade silently
         };
         let embedding = embeddings.into_iter().next().unwrap_or_default();
         self.save_embedding_vector(storage, memory_kind, memory_id, text, embedding)
     }
 
-    /// 预计算向量入库 + 入索引（基准/批量填充用，避免逐条推理）。
+    /// Persist a precomputed vector and add it to the index (used by benchmarks/bulk fill to avoid per-row inference).
     pub fn save_embedding_vector(
         &mut self,
         storage: &TursoStorage,
@@ -288,7 +292,7 @@ impl ProjectVectors {
 
         let key = (memory_kind, memory_id.to_string());
         self.content_map.insert(key.clone(), text.to_string());
-        // 已有向量则先移除（turbovec 无 update，删除重建）
+        // Remove an existing vector first (turbovec has no update; delete and rebuild)
         if let Some(old_id) = self.memory_to_id.remove(&key) {
             let _ = self.index.remove(old_id);
             self.id_to_memory.remove(&old_id);
@@ -300,8 +304,8 @@ impl ProjectVectors {
         Ok(())
     }
 
-    /// 批量向量入库 + 批量索引 add（bench/历史导入用，避免逐条 add 开销）。
-    /// 返回 (memory_id → vector_id) 由调用方决定是否记录；本方法内部维护映射。
+    /// Bulk-persist vectors and batch-add them to the index (bench/history import; avoids per-row add overhead).
+    /// Returns (memory_id → vector_id) only if the caller wants it; this method maintains the mappings internally.
     pub fn save_embeddings_batch(
         &mut self,
         storage: &TursoStorage,
@@ -309,7 +313,7 @@ impl ProjectVectors {
         embeddings: &[Vec<f32>],
     ) -> anyhow::Result<()> {
         debug_assert_eq!(items.len(), embeddings.len());
-        // 1) 向量落库
+        // 1) persist vectors
         for (item, embedding) in items.iter().zip(embeddings.iter()) {
             storage.save_embedding(&MemoryEmbeddingRecord {
                 memory_kind: item.0,
@@ -318,7 +322,7 @@ impl ProjectVectors {
                 model: "all-MiniLM-L6-v2".into(),
             })?;
         }
-        // 2) 批量索引 add
+        // 2) batch index add
         let ids = self.index.add(embeddings)?;
         for ((item, id), _embedding) in items.iter().zip(ids.iter()).zip(embeddings.iter()) {
             let key = (item.0, item.1.clone());
@@ -329,7 +333,7 @@ impl ProjectVectors {
         Ok(())
     }
 
-    /// recall 路径：FTS 候选 → allowlist → 精排 → 候选。
+    /// recall path: FTS candidates → allowlist → re-rank → candidates.
     pub fn build_embedding_candidates(
         &self,
         shared: &SharedEmbedder,
@@ -356,7 +360,7 @@ impl ProjectVectors {
         let mut candidates = Vec::new();
         for hit in hits {
             if hit.score <= 0.0 {
-                continue; // 与 TS 版 filter(embeddingScore > 0) 一致
+                continue; // matches the TS filter(embeddingScore > 0)
             }
             if let Some((kind, memory_id)) = self.id_to_memory.get(&hit.id) {
                 candidates.push(EmbeddingCandidate {

@@ -1,7 +1,7 @@
-//! 运行时编排层（对应 TS 版 `app/runtime.ts` 的规则路径）。
+//! Runtime orchestration layer (the rule path of the TS `app/runtime.ts`).
 //!
-//! 提供 build_recall_injection / retain_turn_memories / consolidate_session_memories /
-//! memory_command 四个业务入口，供 JSON-RPC 分发。
+//! Exposes four business entry points for JSON-RPC dispatch: build_recall_injection /
+//! retain_turn_memories / consolidate_session_memories / memory_command.
 
 use crate::core::consolidation::{
     consolidate_session_memories as consolidate_core, ConsolidateSessionMemoriesOptions,
@@ -15,8 +15,8 @@ use crate::embedding_runtime::{ProjectVectors, SharedEmbedder};
 use crate::models::{MemoryKind, SessionStateRecord, WorkingMemoryRecord};
 use crate::storage::TursoStorage;
 
-/// 生成召回注入文本（对应 buildDefaultRecallInjection）。
-/// embedding 提供语义精排（allowlist 限定在 FTS 候选内）。
+/// Build the recall injection text (matches buildDefaultRecallInjection).
+/// Embedding provides semantic re-ranking (allowlist limited to FTS candidates).
 pub fn build_recall_injection(
     storage: &TursoStorage,
     prompt: &str,
@@ -41,7 +41,7 @@ pub fn build_recall_injection(
     }
     fts_candidates.extend(rank_episodic_candidates(&episodic_hits, MemoryKind::Episodic));
 
-    // embedding 精排：allowlist = FTS 候选（SIMD 内核内过滤，取代 TS 版全扫描）
+    // embedding re-rank: allowlist = FTS candidates (filtered inside the SIMD kernel, replacing the TS full scan)
     let embedding_candidates = vectors
         .build_embedding_candidates(shared, prompt, &fts_memories)?
         .into_iter()
@@ -56,7 +56,7 @@ pub fn build_recall_injection(
         })
         .collect::<Vec<_>>();
 
-    // 保持 TS 版顺序：fts → embedding → structured
+    // Keep the TS ordering: fts → embedding → structured
     let results = recall_memories(RecallMemoriesOptions {
         project_scope,
         limit: 6,
@@ -65,7 +65,7 @@ pub fn build_recall_injection(
         structured_candidates: &structured,
     });
 
-    // 更新 has_recalled_for_first_turn（与 TS 版一致）
+    // Update has_recalled_for_first_turn (matching the TS version)
     let state = storage.get_session_state(session_id)?;
     storage.save_session_state(&SessionStateRecord {
         session_id: session_id.to_string(),
@@ -74,7 +74,7 @@ pub fn build_recall_injection(
         has_recalled_for_first_turn: true,
     })?;
 
-    // 渲染：results.map(r => `- [${kind}] ${content}`).join("\n")
+    // Render: results.map(r => `- [${kind}] ${content}`).join("\n")
     let rendered = results
         .iter()
         .map(|candidate| format!("- [{}] {}", candidate.memory_kind.as_str(), candidate.content))
@@ -83,9 +83,9 @@ pub fn build_recall_injection(
     Ok(rendered)
 }
 
-/// 节奏 retain（对应 retainDefaultTurnMemories）。embedding 可用时写入向量。
-/// `llm_result`：TS 侧调 LLM 生成的结构化 JSON（对应 extractStructuredMemories 的 LLM 路径）；
-/// 为 None 时走规则启发式。
+/// Rhythm retain (matches retainDefaultTurnMemories). Writes vectors when embedding is available.
+/// `llm_result`: structured JSON produced by the TS-side LLM (the LLM path of extractStructuredMemories);
+/// falls back to rule heuristics when None.
 #[allow(clippy::too_many_arguments)]
 pub fn retain_turn_memories(
     storage: &TursoStorage,
@@ -99,7 +99,7 @@ pub fn retain_turn_memories(
 ) -> anyhow::Result<()> {
     let current = storage.get_session_state(session_id)?;
     let memory_id = format!("{session_id}:turn:{turn_index}");
-    // 幂等：以数据存在性为准（turnIndex 可能从 0 开始，state 默认值 0 会误跳过首个 turn）
+    // Idempotent: keyed on data existence (turnIndex may start at 0, so a default state value of 0 would wrongly skip the first turn)
     if storage.get_working(&memory_id)?.is_some() {
         return Ok(());
     }
@@ -122,7 +122,7 @@ pub fn retain_turn_memories(
         superseded_by: None,
     })?;
 
-    // 结构化提取：LLM 结果优先（解析失败降级规则路径）
+    // Structured extraction: LLM result first (falls back to rule path on parse failure)
     let mut structured = None;
     if let Some(payload) = llm_result {
         let parsed = crate::llm::parse_llm_extraction(payload);
@@ -134,7 +134,7 @@ pub fn retain_turn_memories(
     }
     let mut extracted = match structured {
         Some(parsed) => {
-            // 补全 LLM 结果缺失的 id/session/source 字段
+            // Fill in id/session/source fields missing from the LLM result
             let mut parsed = parsed;
             for fact in &mut parsed.facts {
                 if fact.fact_id.is_empty() {
@@ -211,14 +211,14 @@ pub fn retain_turn_memories(
         has_recalled_for_first_turn: current.as_ref().map(|s| s.has_recalled_for_first_turn).unwrap_or(false),
     })?;
 
-    // embedding 入库（失败不阻塞 retain 主流程）
+    // Persist the embedding (failure does not block the retain main flow)
     let _ = vectors.save_embedding(storage, shared, MemoryKind::Working, &memory_id, text);
     Ok(())
 }
 
-/// 会话整合（对应 consolidateDefaultMemories）。
-/// `llm_result`：LLM 生成的摘要文本（Some 时作为 episodic content，degraded=false）；
-/// `llm_failed`：LLM 调用失败（degraded=true，内容用规则拼接）。
+/// Session consolidation (matches consolidateDefaultMemories).
+/// `llm_result`: summary text generated by the LLM (used as episodic content when Some, degraded=false);
+/// `llm_failed`: LLM call failed (degraded=true, content assembled by rules).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ConsolidateResult {
     pub degraded: bool,
@@ -260,7 +260,7 @@ pub fn consolidate_session_memories(
         working_memories: working,
     });
 
-    // LLM 摘要覆盖 content；degraded 标志与 TS 版语义对齐（LLM 失败才 true）
+    // LLM summary overrides content; the degraded flag matches TS semantics (true only when LLM fails)
     if let Some(llm_text) = llm_result {
         if !llm_text.trim().is_empty() {
             if let Some(episodic) = consolidated.episodic_memories.first_mut() {
@@ -270,14 +270,14 @@ pub fn consolidate_session_memories(
     }
     consolidated.degraded = llm_failed;
 
-    // 落库 episodic（对应 runConsolidationOrchestrator）
-    // 同 session 多次 consolidate 时递增序号，避免固定 id 互相覆盖
+    // Persist episodic records (matches runConsolidationOrchestrator)
+    // Multiple consolidations of one session increment the suffix so fixed ids never overwrite each other
     let existing = storage.count_episodic_by_session(session_id)?;
     for (offset, episodic) in consolidated.episodic_memories.iter_mut().enumerate() {
         episodic.id = format!("{session_id}:episodic:{}", existing + offset as i64);
         storage.insert_episodic(episodic)?;
     }
-    // 标记 consolidated_at（对应 TS 版 UPDATE 循环）
+    // Mark consolidated_at (matches the TS UPDATE loop)
     let consolidated_at = now_iso();
     storage.mark_working_consolidated(&consolidated.working_memory_ids, &consolidated_at)?;
 
@@ -288,7 +288,7 @@ pub fn consolidate_session_memories(
     })
 }
 
-/// 整合源文本：当前 session 未 consolidated 的 working 内容（LLM 输入，对应 TS 版 join("；")）。
+/// Source text for consolidation: the current session's un-consolidated working content (LLM input, matches TS join(";")).
 pub fn consolidate_source_text(storage: &TursoStorage, session_id: &str, project_scope: &str) -> String {
     storage
         .list_working_by_project(project_scope)
@@ -297,10 +297,10 @@ pub fn consolidate_source_text(storage: &TursoStorage, session_id: &str, project
         .filter(|m| m.session_id == session_id && m.consolidated_at.is_none())
         .map(|m| m.content)
         .collect::<Vec<_>>()
-        .join("；")
+        .join(";")
 }
 
-/// /memory 命令处理（对应 createDefaultMemoryAdmin）。
+/// /memory command handling (matches createDefaultMemoryAdmin).
 pub fn memory_command(
     storage: &TursoStorage,
     sub: &str,
@@ -351,16 +351,16 @@ pub fn memory_command(
             storage.rebuild_fts()?;
             Ok(format!("rebuild: project={project_scope}"))
         }
-        _ => Ok(format!("未知子命令: {sub}")),
+        _ => Ok(format!("unknown subcommand: {sub}")),
     }
 }
 
 // ---------------------------------------------------------------------------
-// 内部辅助
+// Internal helpers
 // ---------------------------------------------------------------------------
 
 fn to_safe_fts_query(prompt: &str) -> String {
-    // 对应 toSafeFtsQuery：空白切 token，引号包裹，OR 连接
+    // Matches toSafeFtsQuery: split on whitespace, quote tokens, join with OR
     let tokens: Vec<String> = prompt
         .split_whitespace()
         .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
@@ -376,7 +376,7 @@ fn rank_fts_candidates(
     hits: &[(WorkingMemoryRecord, f64)],
     kind: MemoryKind,
 ) -> Vec<RecallCandidateInput> {
-    // 对应 rankFtsCandidates：ftsScore = total === 0 ? 0 : 1 - index/(total+1)
+    // Matches rankFtsCandidates: ftsScore = total === 0 ? 0 : 1 - index/(total+1)
     let total = hits.len();
     hits.iter()
         .enumerate()
@@ -416,7 +416,7 @@ fn query_structured_candidates(
     query_text: &str,
     project_scope: &str,
 ) -> anyhow::Result<Vec<RecallCandidateInput>> {
-    // 对应 queryStructuredCandidates：facts/instructions/preferences/timeline LIKE 查询
+    // Matches queryStructuredCandidates: facts/instructions/preferences/timeline LIKE queries
     let mut candidates = Vec::new();
     for fact in storage.search_facts_like(query_text, project_scope)? {
         candidates.push(RecallCandidateInput {
@@ -466,7 +466,7 @@ fn query_structured_candidates(
 }
 
 pub fn now_iso() -> String {
-    // 对应 new Date().toISOString()
+    // Matches new Date().toISOString()
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 

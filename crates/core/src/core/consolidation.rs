@@ -1,7 +1,7 @@
-//! 会话整合（移植自 TS 版 `core/consolidation.ts`）。
+//! Session consolidation (ported from the TS `core/consolidation.ts`).
 //!
-//! 规则版：无 LLM 时直接拼接 working 记忆内容生成 episodic 记忆。
-//! LLM 路径（含超时降级）由 M3 桥接层接入，degraded 标志语义保留。
+//! Rule version: without an LLM, concatenate the working memory contents into an episodic memory.
+//! The LLM path (with timeout fallback) is wired in by the M3 bridge; the degraded flag semantics are preserved.
 
 use crate::core::extraction::EPOCH_ISO;
 use crate::models::EpisodicMemoryRecord;
@@ -13,7 +13,7 @@ pub struct ConsolidateSessionMemoriesOptions {
     pub working_memories: Vec<WorkingMemoryForConsolidation>,
 }
 
-/// 整合所需的 working 记忆字段子集。
+/// Subset of working memory fields needed for consolidation.
 #[derive(Debug, Clone)]
 pub struct WorkingMemoryForConsolidation {
     pub id: String,
@@ -30,20 +30,20 @@ pub struct ConsolidationResult {
     pub degraded: bool,
 }
 
-/// 规则版整合（对应 consolidateSessionMemories 的降级路径）。
+/// Rule-based consolidation (the degraded path of consolidateSessionMemories).
 pub fn consolidate_session_memories(
     options: &ConsolidateSessionMemoriesOptions,
 ) -> ConsolidationResult {
     let working_memory_ids: Vec<String> = options.working_memories.iter().map(|m| m.id.clone()).collect();
     let source_summary = working_memory_ids.join(",");
-    // 规则版无 LLM：degraded = false（TS 版仅在 llm 存在且失败时为 true）
+    // No LLM in the rule path: degraded = false (TS sets it only when an LLM exists and fails)
     let degraded = false;
     let content = options
         .working_memories
         .iter()
         .map(|m| m.content.as_str())
         .collect::<Vec<_>>()
-        .join("；");
+        .join(";");
 
     let first = options.working_memories.first();
     let last = options.working_memories.last();
@@ -51,7 +51,7 @@ pub fn consolidate_session_memories(
         .working_memories
         .iter()
         .map(|m| m.importance)
-        .fold(0.0_f64, f64::max); // 对应 Math.max(..., 0)：空列表为 0
+        .fold(0.0_f64, f64::max); // matches Math.max(..., 0): empty list → 0
 
     let episodic = EpisodicMemoryRecord {
         id: format!("{}:episodic:0", options.session_id),
@@ -97,8 +97,8 @@ mod tests {
             session_id: "session-1".into(),
             project_scope: "pi-memory".into(),
             working_memories: vec![
-                wm("wm-1", "实现 SQLite schema 与 session_state", 0.8),
-                wm("wm-2", "补齐 SqliteMemoryStore 与 FTS 同步", 0.9),
+                wm("wm-1", "implemented SQLite schema and session_state", 0.8),
+                wm("wm-2", "completed SqliteMemoryStore and FTS sync", 0.9),
             ],
         });
 
@@ -108,8 +108,8 @@ mod tests {
         assert_eq!(episodic.id, "session-1:episodic:0");
         assert_eq!(episodic.summary_of, "wm-1,wm-2");
         assert_eq!(episodic.memory_type, "episodic");
-        assert_eq!(episodic.content, "实现 SQLite schema 与 session_state；补齐 SqliteMemoryStore 与 FTS 同步");
-        assert_eq!(episodic.importance, 0.9, "importance 取 max");
+        assert_eq!(episodic.content, "implemented SQLite schema and session_state;completed SqliteMemoryStore and FTS sync");
+        assert_eq!(episodic.importance, 0.9, "importance takes the max");
         assert_eq!(episodic.metadata, Some(serde_json::json!({ "degraded": false })));
     }
 
@@ -126,3 +126,4 @@ mod tests {
         assert_eq!(result.episodic_memories[0].content, "");
     }
 }
+

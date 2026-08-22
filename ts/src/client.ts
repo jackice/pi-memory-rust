@@ -1,12 +1,12 @@
 /**
- * pi-memory-rust JSON-RPC 客户端 + 常驻进程生命周期管理。
+ * pi-memory-rust JSON-RPC client + resident process lifecycle management.
  *
- * 职责（参照 oh-my-pi loader 的职责分离思路）：
- * - spawn / shutdown 常驻 Rust 进程（`pi-memory-server` 二进制）；
- * - 帧协议（`<u32 大端长度><JSON>`）与版本握手；
- * - 调用超时与错误归一化；
- * - 崩溃检测与有限次自动重启；
- * - 诊断信息（版本、后端、最近错误）。
+ * Responsibilities (mirroring the oh-my-pi loader's separation of concerns):
+ * - spawn/shutdown the resident Rust process (the `pi-memory-server` binary);
+ * - frame protocol (`<u32 big-endian length><JSON>`) and version handshake;
+ * - call timeout and error normalization;
+ * - crash detection with bounded auto-restart;
+ * - diagnostics (version, backend, recent errors).
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
@@ -14,10 +14,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
 
-/** 协议版本，与 Rust 侧 `PROTOCOL_VERSION` 保持一致 */
+/** Protocol version, kept in sync with the Rust `PROTOCOL_VERSION` */
 export const PROTOCOL_VERSION = 1;
 
-/** 单次调用默认超时（ms），对齐 TS 版 embedding 100ms 语义的降级目标 */
+/** Default per-call timeout (ms); aligns with the TS embedding 100ms degradation target */
 export const DEFAULT_CALL_TIMEOUT_MS = 2000;
 
 export interface RpcError {
@@ -32,12 +32,12 @@ export interface RpcResponse {
 }
 
 export interface ClientOptions {
-  /** pi-memory-server 二进制路径；缺省时按环境变量/相对路径解析 */
+  /** pi-memory-server binary path; resolved from env/relative paths when omitted */
   binaryPath?: string;
   callTimeoutMs?: number;
-  /** 进程崩溃后的最大重启次数 */
+  /** Maximum restarts after a crash */
   maxRestarts?: number;
-  /** 日志输出目标（默认 stderr） */
+  /** Log output target (defaults to stderr) */
   log?: (line: string) => void;
 }
 
@@ -58,14 +58,14 @@ export class MemoryRustClient {
       callTimeoutMs: options.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS,
       maxRestarts: options.maxRestarts ?? 3,
       log: options.log ?? ((line) => {
-        // 默认静默：子进程日志直写 stderr 会污染 pi 的 TUI 渲染；
-        // 设置 PI_MEMORY_DEBUG=1 时输出诊断（Rust 侧内容已去前缀，这里统一加）
+        // Quiet by default: writing child logs straight to stderr corrupts the pi TUI;
+        // with PI_MEMORY_DEBUG=1, diagnostics go out (Rust content has no prefix; this adds one)
         if (process.env.PI_MEMORY_DEBUG) process.stderr.write(`[pi-memory-rust] ${line}\n`);
       }),
     };
   }
 
-  /** 确保常驻进程已启动并完成版本握手 */
+  /** Ensure the resident process is up and the version handshake completed */
   async ensureStarted(): Promise<void> {
     if (this.proc && this.proc.exitCode === null) return;
     if (this.startPromise) {
@@ -79,7 +79,7 @@ export class MemoryRustClient {
         this.startProcess();
         const hello = await this.invoke("hello", { version: PROTOCOL_VERSION });
         if (hello.error) {
-          throw new Error(`pi-memory-rust 协议握手失败: ${hello.error.message}`);
+          throw new Error(`pi-memory-rust handshake failed: ${hello.error.message}`);
         }
       } catch (error) {
         const proc = this.proc;
@@ -99,7 +99,7 @@ export class MemoryRustClient {
     }
   }
 
-  /** 通用调用：返回 result，错误（含超时/进程退出）抛异常 */
+  /** Generic call: returns result, throws on errors (timeouts, process exit) */
   async call<T = unknown>(method: string, params: unknown = {}, timeoutMs?: number): Promise<T> {
     await this.ensureStarted();
     const response = await this.invoke(method, params, timeoutMs);
@@ -107,10 +107,10 @@ export class MemoryRustClient {
     return response.result as T;
   }
 
-  /** 健康自检（不会触发进程启动失败时的级联错误） */
+  /** Health check (does not cascade errors when the process failed to start) */
   async diagnose(): Promise<Record<string, unknown>> {
     if (!this.proc || this.proc.exitCode !== null) {
-      return { backend: "unavailable", error: "进程未启动" };
+      return { backend: "unavailable", error: "process not started" };
     }
     try {
       const response = await this.invoke("diagnose", {});
@@ -121,13 +121,13 @@ export class MemoryRustClient {
     }
   }
 
-  /** 优雅关闭：先发 shutdown，超时则强杀 */
+  /** Graceful shutdown: send shutdown first, SIGKILL on timeout */
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
     const proc = this.proc;
     if (!proc || proc.exitCode !== null) return;
     try {
-      // Rust 侧会在响应后限时等待后台模型加载结束再退出（≤800ms），此处给足退出余量
+      // The Rust side bounded-waits (≤800ms) for the background model load after responding; give it exit margin here
       await this.invoke("shutdown", {}, 500);
       await this.waitForExit(proc, 1500);
     } catch {
@@ -141,18 +141,18 @@ export class MemoryRustClient {
   }
 
   // -------------------------------------------------------------------------
-  // 内部
+  // Internals
   // -------------------------------------------------------------------------
 
   private startProcess(resetRestartCount = true): void {
     if (resetRestartCount) {
       this.restartCount = 0;
     }
-    // 数据库路径由 Rust 侧按 projectScope 管理（单进程多库，物理隔离）
+    // Database paths are managed by the Rust side per projectScope (single process, multiple DBs, physical isolation)
     if (!fs.existsSync(this.options.binaryPath)) {
       throw new Error(
-        `pi-memory-server 二进制不存在: ${this.options.binaryPath}\n` +
-          `请安装 leaf 包（@jackice/pi-memory-rust-${process.platform}-${process.arch}）或设置 PI_MEMORY_RUST_BINARY`,
+        `pi-memory-server binary not found: ${this.options.binaryPath}\n` +
+          `install the leaf package (@jackice/pi-memory-rust-${process.platform}-${process.arch}) or set PI_MEMORY_RUST_BINARY`,
       );
     }
     const proc = spawn(this.options.binaryPath, [], { stdio: ["pipe", "pipe", "pipe"] });
@@ -167,26 +167,26 @@ export class MemoryRustClient {
   }
 
   private onExit(code: number | null, signal: string | null): void {
-    const reason = signal ? `信号 ${signal}` : `退出码 ${code}`;
-    this.options.log(`进程退出：${reason}`);
-    // 失败所有挂起请求
+    const reason = signal ? `signal ${signal}` : `exit code ${code}`;
+    this.options.log(`process exited: ${reason}`);
+    // Fail all pending requests
     for (const [, entry] of this.pending) {
       clearTimeout(entry.timer);
-      entry.reject(new Error(`进程退出：${reason}`));
+      entry.reject(new Error(`process exited: ${reason}`));
     }
     this.pending.clear();
     this.proc = null;
-    // 非主动关闭时自动重启（有限次）
+    // Auto-restart on unexpected exit (bounded)
     if (!this.shuttingDown && !this.startingUp && this.restartCount < this.options.maxRestarts) {
       this.restartCount += 1;
-      this.options.log(`自动重启（第 ${this.restartCount} 次）`);
+      this.options.log(`auto-restart (#${this.restartCount})`);
       this.startProcess(false);
     }
   }
 
   private onData(chunk: Buffer): void {
     this.buffer = Buffer.concat([this.buffer, chunk]);
-    // 解析完整的帧
+    // Parse complete frames
     while (this.buffer.length >= 4) {
       const len = this.buffer.readUInt32BE(0);
       if (this.buffer.length < 4 + len) break;
@@ -200,7 +200,7 @@ export class MemoryRustClient {
         this.pending.delete(response.id);
         entry.resolve(response);
       } catch {
-        this.options.log(`响应解析失败: ${payload.slice(0, 200)}`);
+        this.options.log(`failed to parse response: ${payload.slice(0, 200)}`);
       }
     }
   }
@@ -208,18 +208,18 @@ export class MemoryRustClient {
   private invoke(method: string, params: unknown, timeoutMs?: number): Promise<RpcResponse> {
     const proc = this.proc;
     if (!proc) {
-      return Promise.reject(new Error("pi-memory-rust 进程未启动"));
+      return Promise.reject(new Error("pi-memory-rust process not started"));
     }
     const id = this.nextId++;
     const timer = setTimeout(() => {
       const entry = this.pending.get(id);
       if (entry) {
         this.pending.delete(id);
-        entry.reject(new Error(`调用超时：${method}`));
+        entry.reject(new Error(`call timed out: ${method}`));
       }
-      // 超时视为进程无响应，按崩溃处理以便重启
+      // Treat a timeout as an unresponsive process and restart like a crash
       proc.kill("SIGKILL");
-      // 上面 kill 会触发 exit → 失败该请求，这里兜底避免悬挂
+      // The kill above triggers exit → fails the request; this is a backstop against hanging
     }, timeoutMs ?? this.options.callTimeoutMs);
     timer.unref();
     const promise = new Promise<RpcResponse>((resolve, reject) => {
@@ -240,7 +240,7 @@ export class MemoryRustClient {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         cleanup();
-        reject(new Error("等待进程退出超时"));
+        reject(new Error("timed out waiting for process exit"));
       }, timeoutMs);
       timer.unref();
 
@@ -267,10 +267,10 @@ export class MemoryRustClient {
 }
 
 /**
- * 解析 pi-memory-server 二进制路径：
- * 1. 环境变量 PI_MEMORY_RUST_BINARY（显式指定）
- * 2. leaf 包（npm 安装场景，@jackice/pi-memory-rust-<platform>-<arch>）
- * 3. 包内 bin/（本地开发，pi install ./ts 时保留）
+ * Resolve the pi-memory-server binary path:
+ * 1. the PI_MEMORY_RUST_BINARY env var (explicit)
+ * 2. the leaf package (npm installs, @jackice/pi-memory-rust-<platform>-<arch>)
+ * 3. the in-package bin/ (local development, kept by pi install ./ts)
  */
 function resolveBinaryPath(): string {
   const fromEnv = process.env.PI_MEMORY_RUST_BINARY;
@@ -282,8 +282,9 @@ function resolveBinaryPath(): string {
     const candidate = path.join(leafDir, "pi-memory-server" + (process.platform === "win32" ? ".exe" : ""));
     if (fs.existsSync(candidate)) return candidate;
   } catch {
-    // leaf 包未安装（本地开发/未发布），回退包内 bin
+    // Leaf package not installed (local dev/unpublished); fall back to the in-package bin
   }
   return new URL("../bin/pi-memory-server", import.meta.url).pathname;
 }
+
 

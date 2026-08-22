@@ -1,13 +1,13 @@
-//! JSON-RPC 2.0 协议类型（TS 客户端 ↔ Rust 常驻进程）。
+//! JSON-RPC 2.0 protocol types (TS client ↔ Rust resident process).
 //!
-//! 设计约束：
-//! - 请求/响应均为小负载（prompt、Top-K 候选、配置），重活（embedding 批量、索引检索）在子进程内完成；
-//! - 帧格式：单行 JSON（`\n` 分隔），带 length 前缀防粘包：`<u32 长度字节><JSON 字节>`；
-//! - 版本握手：`hello` 请求交换协议版本，版本不匹配立即报错退出。
+//! Design constraints:
+//! - requests/responses are small payloads (prompt, top-K candidates, config); heavy work (embedding batches, index search) runs inside the child process;
+//! - frame format: single-line JSON separated by `\n`, with a length prefix to avoid sticky frames: `<u32 length bytes><JSON bytes>`;
+//! - version handshake: the `hello` request exchanges the protocol version; a mismatch fails fast.
 
 use serde::{Deserialize, Serialize};
 
-/// 当前协议版本，随不兼容变更递增。
+/// Current protocol version; bumped on incompatible changes.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -34,57 +34,57 @@ pub struct RpcError {
 }
 
 // ---------------------------------------------------------------------------
-// 方法与参数
+// Methods and params
 // ---------------------------------------------------------------------------
 
-/// 支持的 RPC 方法名（M1 起步集）。
+/// Supported RPC method names (M1 initial set).
 pub mod methods {
-    /// 版本握手。params: { "version": u32 }
+    /// Version handshake. params: { "version": u32 }
     pub const HELLO: &str = "hello";
-    /// 健康自检。params: {} → 返回诊断信息
+    /// Health check. params: {} → returns diagnostics
     pub const DIAGNOSE: &str = "diagnose";
-    /// 关闭服务。params: {} → 进程退出
+    /// Shut down the service. params: {} → process exits
     pub const SHUTDOWN: &str = "shutdown";
-    /// 召回注入。params: { prompt, projectScope, sessionId }
+    /// Recall injection. params: { prompt, projectScope, sessionId }
     pub const BUILD_RECALL_INJECTION: &str = "buildRecallInjection";
-    /// 节奏 retain。params: { turnIndex, text, sessionId, projectScope }
+    /// Rhythmic retain. params: { turnIndex, text, sessionId, projectScope }
     pub const RETAIN_TURN_MEMORIES: &str = "retainTurnMemories";
-    /// 会话整合。params: { sessionId, projectScope }
+    /// Session consolidation. params: { sessionId, projectScope }
     pub const CONSOLIDATE_SESSION_MEMORIES: &str = "consolidateSessionMemories";
-    /// /memory 命令。params: { sub, target, projectScope, sessionId }
+    /// /memory command. params: { sub, target, projectScope, sessionId }
     pub const MEMORY_COMMAND: &str = "memoryCommand";
-    /// 手动触发模型下载。params: {}
+    /// Manually trigger model download. params: {}
     pub const PREPARE_MODEL: &str = "prepareModel";
-    /// 迁移旧 SQLite 库。params: { sourcePath }
+    /// Migrate a legacy SQLite database. params: { sourcePath }
     pub const MIGRATE: &str = "migrate";
-    /// 获取 LLM prompt 模板。params: {}
+    /// Fetch LLM prompt templates. params: {}
     pub const LLM_PROMPTS: &str = "llmPrompts";
-    /// 获取整合源文本（未 consolidated 的 working 内容）。params: { sessionId, projectScope }
+    /// Fetch the consolidation source text (un-consolidated working content). params: { sessionId, projectScope }
     pub const CONSOLIDATE_SOURCE: &str = "consolidateSource";
 }
 
-/// hello 请求参数
+/// hello request params
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HelloParams {
     pub version: u32,
 }
 
-/// hello 响应结果
+/// hello response result
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HelloResult {
     pub version: u32,
     pub name: String,
 }
 
-/// 标准错误码
+/// Standard error codes
 pub mod codes {
-    /// 请求方法不存在
+    /// Requested method does not exist
     pub const METHOD_NOT_FOUND: i32 = -32601;
-    /// 参数无效
+    /// Invalid params
     pub const INVALID_PARAMS: i32 = -32602;
-    /// 内部错误
+    /// Internal error
     pub const INTERNAL_ERROR: i32 = -32603;
-    /// 协议版本不匹配
+    /// Protocol version mismatch
     pub const VERSION_MISMATCH: i32 = -32000;
 }
 
@@ -101,3 +101,4 @@ impl RpcResponse {
         }
     }
 }
+

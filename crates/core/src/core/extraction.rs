@@ -1,11 +1,11 @@
-//! 结构化提取：本地规则启发式（移植自 TS 版 `core/extraction.ts`）。
+//! Structured extraction: local rule heuristics (ported from the TS `core/extraction.ts`).
 //!
-//! LLM 路径（fromJsonPayload）由 M3 桥接层实现，本模块为纯规则路径
-//! （extractWithHeuristics），行为逐位一致。
+//! The LLM path (fromJsonPayload) is implemented by the M3 bridge; this module is the pure rule path
+//! (extractWithHeuristics), bit-for-bit aligned.
 
 use crate::models::{FactRecord, InstructionRecord, PreferenceRecord, TimelineEventRecord};
 
-/// `new Date(0).toISOString()` 的固定值
+/// Fixed value of `new Date(0).toISOString()`
 pub const EPOCH_ISO: &str = "1970-01-01T00:00:00.000Z";
 
 #[derive(Debug, Clone)]
@@ -24,7 +24,7 @@ pub struct StructuredExtractionResult {
     pub timeline: Vec<TimelineEventRecord>,
 }
 
-/// 规则启发式提取（对应 extractWithHeuristics）。
+/// Rule-heuristic extraction (matches extractWithHeuristics).
 pub fn extract_with_heuristics(options: &ExtractStructuredMemoriesOptions) -> StructuredExtractionResult {
     let mut facts = Vec::new();
     let mut preferences = Vec::new();
@@ -39,12 +39,12 @@ pub fn extract_with_heuristics(options: &ExtractStructuredMemoriesOptions) -> St
         .collect();
 
     for (index, line) in segments.iter().enumerate() {
-        // 事实: 前缀
+        // "事实:" prefix
         if let Some(statement) = strip_prefix(line, "事实:") {
             facts.push(create_fact(options, index, statement));
             continue;
         }
-        // 偏好: 前缀或推断
+        // "偏好:" prefix or inference
         let preference = strip_prefix(line, "偏好:").or_else(|| infer_preference(line));
         if let Some(preference) = preference {
             preferences.push(PreferenceRecord {
@@ -59,7 +59,7 @@ pub fn extract_with_heuristics(options: &ExtractStructuredMemoriesOptions) -> St
             });
             continue;
         }
-        // 指令: 前缀或推断
+        // "指令:" prefix or inference
         let instruction = strip_prefix(line, "指令:").or_else(|| infer_instruction(line));
         if let Some(instruction) = instruction {
             instructions.push(InstructionRecord {
@@ -75,7 +75,7 @@ pub fn extract_with_heuristics(options: &ExtractStructuredMemoriesOptions) -> St
             });
             continue;
         }
-        // 时间线: 前缀优先，无前缀也尝试推断
+        // "时间线:" prefix first, then inference without a prefix
         let timeline_event = strip_prefix(line, "时间线:")
             .and_then(infer_timeline)
             .or_else(|| infer_timeline(line));
@@ -123,7 +123,7 @@ fn infer_preference(line: &str) -> Option<&str> {
     if !line.contains("喜欢") && !line.contains("偏好") {
         return None;
     }
-    // 对应 JS `/^我更?/`：剥离「我」或「我更」
+    // Matches JS `/^我更?/`: strip a leading "我更" or "我"
     let stripped = line.strip_prefix("我更").or_else(|| line.strip_prefix("我")).unwrap_or(line);
     Some(stripped.trim())
 }
@@ -137,7 +137,7 @@ fn infer_instruction(line: &str) -> Option<&str> {
 }
 
 fn infer_timeline(line: &str) -> Option<(String, String)> {
-    // 对应 JS `/(\d{4}-\d{2}-\d{2})\s*(.*)/`；调用方已剥离「时间线:」前缀
+    // Matches JS `/(\d{4}-\d{2}-\d{2})\s*(.*)/`; the caller has already stripped the "时间线:" prefix
     let date = line.get(0..10)?;
     if !is_date_like(date) {
         return None;
@@ -176,7 +176,7 @@ fn parse_fact_statement(statement: &str) -> (String, String, String) {
             }
         }
     }
-    // 兜底：subject = object = statement，predicate = "记录为"
+    // Fallback: subject = object = statement, predicate = "记录为"
     (statement.to_string(), "记录为".to_string(), statement.to_string())
 }
 
@@ -241,3 +241,4 @@ mod tests {
         assert_eq!(result.facts.len(), 2);
     }
 }
+

@@ -1,25 +1,26 @@
 import { test, expect } from "bun:test";
 import { MemoryRustClient } from "../src/client.ts";
 
-test("常驻进程生命周期与 JSON-RPC 链路", async () => {
+test("resident process lifecycle and JSON-RPC pipeline", async () => {
   const logs: string[] = [];
   const client = new MemoryRustClient({
     binaryPath: new URL("../bin/pi-memory-server", import.meta.url).pathname,
     log: (line) => logs.push(line),
   });
 
-  // 启动 + 握手
+  // start + handshake
   await client.ensureStarted();
 
   // diagnose
   const diag = await client.diagnose();
   expect(diag.backend).toBe("turso");
 
-  // 未知方法应抛错
+  // unknown method should throw
   await expect(client.call("nope")).rejects.toThrow();
 
-  // 优雅关闭
+  // graceful shutdown
   await client.shutdown();
   expect(logs.some((line) => line.includes("SIGKILL"))).toBe(false);
-  expect(logs.some((line) => line.includes("退出码 0"))).toBe(true);
+  expect(logs.some((line) => line.includes("exit code 0"))).toBe(true);
 });
+

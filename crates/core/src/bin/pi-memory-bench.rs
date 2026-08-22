@@ -1,11 +1,11 @@
-//! 万级记忆基准测试工具。
+//! Benchmark tool for 10k-scale memories.
 //!
-//! 用法：`cargo run --release -p pi-memory-core --bin pi-memory-bench [--count 10000] [--queries 100]`
+//! Usage: `cargo run --release -p pi-memory-core --bin pi-memory-bench [--count 10000] [--queries 100]`
 //!
-//! 测什么（全部本地计算，零 LLM API 消耗）：
-//! - 写入：N 条记忆（retain 真实路径：规则提取 + ONNX embedding + turbovec 索引 + Tantivy FTS）
-//! - 召回：M 个查询的 buildRecallInjection 延迟（FTS 粗筛 + embedding 精排 + 多路合并）
-//!   验收对照：万级记忆 recall 注入 ≤ 300ms（spec §6）。
+//! What is measured (all local computation, zero LLM API cost):
+//! - write: N memories (real retain path: rule extraction + ONNX embedding + turbovec index + Tantivy FTS)
+//! - recall: buildRecallInjection latency for M queries (FTS coarse filter + embedding re-rank + multi-source merge)
+//!   acceptance: recall injection ≤ 300ms at 10k memories (spec §6).
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -21,21 +21,21 @@ fn main() {
     let queries: usize = arg(&args, "--queries").unwrap_or(100);
     let scope = format!("/tmp/pi-memory-bench-{}", std::process::id());
 
-    // 隔离的数据目录（不污染真实数据）
+    // Isolated data directory (does not touch real data)
     let data_dir = std::env::temp_dir().join("pi-memory-bench");
     let _ = std::fs::remove_dir_all(&data_dir);
-    let db_path = paths::ensure_project_db_dir(&data_dir, &scope).expect("创建基准库失败");
-    let storage = TursoStorage::open(db_path.to_str().expect("路径 UTF-8")).expect("打开基准库失败");
+    let db_path = paths::ensure_project_db_dir(&data_dir, &scope).expect("failed to create benchmark db");
+    let storage = TursoStorage::open(db_path.to_str().expect("path UTF-8")).expect("failed to open benchmark db");
     let shared = SharedEmbedder::new();
 
-    println!("== pi-memory-rust 基准测试 ==");
-    println!("记忆条数: {count} | 查询数: {queries}");
-    println!("模型: {}", shared.status());
+    println!("== pi-memory-rust benchmark ==");
+    println!("memories: {count} | queries: {queries}");
+    println!("model: {}", shared.status());
     if !shared.ensure_loaded() {
-        eprintln!("[bench] 模型未就绪（embeddings 将降级，结果仅供 FTS 参考）。可先运行 /memory prepare-model 或设置 PI_MEMORY_MODEL_PATH");
+        eprintln!("[bench] model not ready (embeddings will degrade; results are FTS-only). Run /memory prepare-model or set PI_MEMORY_MODEL_PATH");
     }
 
-    // 构造测试文本：模板化中文/英文混合，保证 FTS 与 embedding 都有内容
+    // Build test texts: templated CJK/English mix so both FTS and embedding have content
     let topics = ["SQLite 迁移", "Rust 重写", "向量检索", "全文搜索", "会话整合",
                   "记忆隔离", "embedding 模型", "Tantivy 索引", "turbovec 量化", "JSON-RPC 桥接"];
     let texts: Vec<String> = (0..count)
@@ -50,22 +50,22 @@ fn main() {
         })
         .collect();
 
-    // ---------- 写入基准 ----------
-    // 批量填充：批量 embed（onnxruntime 批量推理效率高）+ 逐条写入/索引，
-    // 模拟系统在积累到万级记忆后的状态；单条 retain 路径在 [单条写入] 节单独测。
-    let mut vectors = ProjectVectors::new().expect("创建向量索引失败");
-    println!("\n[写入] 批量填充 {count} 条（embed 批大小 64，事务提交）...");
+    // ---------- write benchmark ----------
+    // Bulk fill: batched embed (onnxruntime batches efficiently) + per-row write/index,
+    // simulates the system after accumulating 10k memories; the single-turn retain path is measured separately below.
+    let mut vectors = ProjectVectors::new().expect("failed to create vector index");
+    println!("\n[write] bulk-filling {count} rows (embed batch size 64, tx commit)...");
     let write_start = Instant::now();
     let mut embed_total = std::time::Duration::new(0, 0);
     let batch_size = 64usize;
-    storage.begin_tx().expect("开启事务失败");
-    storage.drop_fts().expect("删除 FTS 索引失败（填充阶段）");
+    storage.begin_tx().expect("failed to begin tx");
+    storage.drop_fts().expect("failed to drop FTS index (fill phase)");
     let mut all_items: Vec<(pi_memory_core::models::MemoryKind, String, String)> = Vec::with_capacity(count);
     let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(count);
     let mut records: Vec<pi_memory_core::models::WorkingMemoryRecord> = Vec::with_capacity(count);
     for (batch_start, chunk) in texts.chunks(batch_size).enumerate() {
         let t_embed = Instant::now();
-        let embeddings = shared.embed(chunk).expect("embed 失败");
+        let embeddings = shared.embed(chunk).expect("embed failed");
         embed_total += t_embed.elapsed();
         for (offset, (text, embedding)) in chunk.iter().zip(embeddings.iter()).enumerate() {
             let i = batch_start * batch_size + offset;
@@ -90,69 +90,69 @@ fn main() {
             });
         }
         if (batch_start + 1) % 16 == 0 {
-            println!("  ... {} 条（{:.1}s）", (batch_start + 1) * batch_size, write_start.elapsed().as_secs_f64());
+            println!("  ... {} rows ({:.1}s)", (batch_start + 1) * batch_size, write_start.elapsed().as_secs_f64());
         }
     }
     let t_db = Instant::now();
     for record in &records {
-        storage.insert_working(record).expect("insert 失败");
+        storage.insert_working(record).expect("insert failed");
     }
     let db_elapsed = t_db.elapsed();
     let t_vec = Instant::now();
     vectors
         .save_embeddings_batch(&storage, &all_items, &all_embeddings)
-        .expect("批量向量入库失败");
+        .expect("bulk vector persist failed");
     let vec_elapsed = t_vec.elapsed();
-    storage.commit_tx().expect("提交事务失败");
+    storage.commit_tx().expect("failed to commit tx");
     let t_fts = Instant::now();
-    storage.rebuild_fts().expect("重建 FTS 索引失败");
+    storage.rebuild_fts().expect("failed to rebuild FTS index");
     let fts_elapsed = t_fts.elapsed();
     let write_elapsed = write_start.elapsed();
     println!(
-        "  [分阶段] embed {:.1}s | DB写入 {:.1}s | 向量索引 {:.1}s | FTS重建 {:.1}s",
+        "  [phases] embed {:.1}s | DB write {:.1}s | vector index {:.1}s | FTS rebuild {:.1}s",
         embed_total.as_secs_f64(),
         db_elapsed.as_secs_f64(),
         vec_elapsed.as_secs_f64(),
         fts_elapsed.as_secs_f64()
     );
     println!(
-        "[写入] 完成：{} 条，耗时 {:.2}s（平均 {:.2}ms/条）",
+        "[write] done: {} rows in {:.2}s ({:.2}ms/row avg)",
         count,
         write_elapsed.as_secs_f64(),
         write_elapsed.as_secs_f64() * 1000.0 / count as f64
     );
 
-    // 单条 retain 路径（真实用户每轮行为）抽样 5 条
+    // Sample 5 rows through the single-turn retain path (the real per-turn behavior)
     if count >= 5 {
-        println!("\n[单条写入] 抽样 5 条 retain（真实路径，含规则提取 + 单条 embed）...");
+        println!("\n[single write] sampling 5 retains (real path: rule extraction + single embed)...");
         let mut single_latencies = Vec::new();
         for (i, text) in texts.iter().enumerate().take(5) {
             let t = Instant::now();
             retain_turn_memories(
                 &storage, 100_000 + i as i64, text, "bench-session", &scope, &shared, &mut vectors, None,
             )
-            .expect("retain 失败");
+            .expect("retain failed");
             single_latencies.push(t.elapsed().as_secs_f64() * 1000.0);
         }
         let avg_single = single_latencies.iter().sum::<f64>() / single_latencies.len() as f64;
-        println!("[单条写入] 平均 {avg_single:.2} ms/条");
+        println!("[single write] avg {avg_single:.2} ms/row");
     }
 
-    // ---------- 召回基准 ----------
+    // ---------- recall benchmark ----------
     let query_prompts: Vec<String> = (0..queries)
-        .map(|q| format!("{} 方案怎么样？", topics[(q * 3) % topics.len()]))
+        .map(|q| format!("how about {}?", topics[(q * 3) % topics.len()]))
         .collect();
 
-    println!("\n[召回] 开始（{queries} 个查询，buildRecallInjection 全链路）...");
+    println!("\n[recall] running {queries} queries (full buildRecallInjection path)...");
     let mut latencies: Vec<f64> = Vec::with_capacity(queries);
     for prompt in &query_prompts {
         let t = Instant::now();
         let injection = build_recall_injection(&storage, prompt, &scope, "bench-session", &shared, &mut vectors)
-            .expect("recall 失败");
+            .expect("recall failed");
         latencies.push(t.elapsed().as_secs_f64() * 1000.0);
-        // 校验注入非空（FTS 命中的话）
+        // Sanity-check that the injection is non-empty (when FTS hits)
         if injection.is_empty() {
-            eprintln!("  [warn] 查询无命中: {prompt}");
+            eprintln!("  [warn] no hit for query: {prompt}");
         }
     }
     latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -160,14 +160,14 @@ fn main() {
     let p50 = latencies[latencies.len() / 2];
     let p95 = latencies[(latencies.len() as f64 * 0.95) as usize];
     let max = latencies[latencies.len() - 1];
-    println!("[召回] 延迟（ms）: 平均 {avg:.2} | P50 {p50:.2} | P95 {p95:.2} | 最大 {max:.2}");
+    println!("[recall] latency (ms): avg {avg:.2} | P50 {p50:.2} | P95 {p95:.2} | max {max:.2}");
 
-    // 库文件大小
+    // Database file size
     let db_size = std::fs::metadata(&db_path).map(|m| m.len() as f64 / 1024.0 / 1024.0).unwrap_or(0.0);
-    println!("[存储] 库文件: {:.1} MB", db_size);
+    println!("[storage] db file: {:.1} MB", db_size);
 
-    // ---------- 汇总（README 用） ----------
-    println!("\n== 汇总 ==");
+    // ---------- summary (for README) ----------
+    println!("\n== summary ==");
     println!("count={count}");
     println!("write_total_s={:.2}", write_elapsed.as_secs_f64());
     println!("write_per_item_ms={:.2}", write_elapsed.as_secs_f64() * 1000.0 / count as f64);
@@ -186,3 +186,4 @@ fn arg(args: &[String], name: &str) -> Option<usize> {
 
 #[allow(dead_code)]
 fn _keep_pathbuf(_: PathBuf) {}
+

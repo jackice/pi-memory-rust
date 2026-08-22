@@ -1,11 +1,11 @@
-//! 数据库路径解析：按 projectScope 隔离（对应 TS 版 paths.ts）。
+//! Database path resolution: isolated by projectScope (matches the TS paths.ts).
 //!
-//! 布局：<data_dir>/memories/<base64url(projectScope)>/memory.db
-//! data_dir 默认 ~/.local/share/pi-memory-rust（PI_MEMORY_DATA_DIR 可覆盖）。
+//! Layout: <data_dir>/memories/<base64url(projectScope)>/memory.db
+//! data_dir defaults to ~/.local/share/pi-memory-rust (override with PI_MEMORY_DATA_DIR).
 
 use std::path::PathBuf;
 
-/// 默认数据根目录（对应 TS 版 normalizeProjectScope 的 base64url 编码）。
+/// Default data root (base64url encoding like the TS normalizeProjectScope).
 pub fn default_data_dir() -> PathBuf {
     if let Ok(path) = std::env::var("PI_MEMORY_DATA_DIR") {
         return PathBuf::from(path);
@@ -20,7 +20,7 @@ pub fn default_data_dir() -> PathBuf {
     base.join("pi-memory-rust")
 }
 
-/// projectScope → base64url 编码（无 padding），与 TS 版一致。
+/// projectScope → base64url encoding (no padding), matching the TS version.
 pub fn normalize_project_scope(project_scope: &str) -> String {
     use base64::Engine as _;
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(project_scope.as_bytes());
@@ -31,7 +31,7 @@ pub fn normalize_project_scope(project_scope: &str) -> String {
     }
 }
 
-/// 某项目的数据库文件路径。
+/// Database file path for a project.
 pub fn resolve_project_db_path(data_dir: &std::path::Path, project_scope: &str) -> PathBuf {
     data_dir
         .join("memories")
@@ -39,7 +39,7 @@ pub fn resolve_project_db_path(data_dir: &std::path::Path, project_scope: &str) 
         .join("memory.db")
 }
 
-/// 确保项目库的父目录存在。
+/// Ensure the project database's parent directory exists.
 pub fn ensure_project_db_dir(data_dir: &std::path::Path, project_scope: &str) -> std::io::Result<PathBuf> {
     let path = resolve_project_db_path(data_dir, project_scope);
     if let Some(parent) = path.parent() {
@@ -54,7 +54,7 @@ mod tests {
 
     #[test]
     fn scope_encoding_matches_ts_base64url() {
-        // TS 版 normalizeProjectScope("/proj/demo") 的 base64url 结果
+        // base64url result of the TS normalizeProjectScope("/proj/demo")
         assert_eq!(normalize_project_scope("/proj/demo"), "L3Byb2ovZGVtbw");
         assert_eq!(normalize_project_scope(""), "root");
     }
@@ -68,3 +68,4 @@ mod tests {
         assert!(a.to_string_lossy().ends_with("memory.db"));
     }
 }
+

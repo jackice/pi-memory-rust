@@ -1,4 +1,4 @@
-//! 数据模型：对应 TS 版 `src/core/types.ts`，字段与语义一致。
+//! Data models: match the TS `src/core/types.ts`, same fields and semantics.
 
 use serde::{Deserialize, Serialize};
 
@@ -36,7 +36,7 @@ impl MemoryKind {
     }
 }
 
-/// working_memory 记录（对应 WorkingMemoryRecord）
+/// working_memory record (matches WorkingMemoryRecord)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkingMemoryRecord {
     pub id: String,
@@ -61,7 +61,7 @@ pub struct WorkingMemoryRecord {
     pub superseded_by: Option<String>,
 }
 
-/// episodic_memory 记录（对应 EpisodicMemoryRecord）
+/// episodic_memory record (matches EpisodicMemoryRecord)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EpisodicMemoryRecord {
     pub id: String,
@@ -84,7 +84,7 @@ pub struct EpisodicMemoryRecord {
     pub superseded_by: Option<String>,
 }
 
-/// facts 记录（对应 FactRecord）
+/// facts record (matches FactRecord)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FactRecord {
     pub fact_id: String,
@@ -95,12 +95,12 @@ pub struct FactRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_memory_id: Option<String>,
     pub session_id: String,
-    /// 项目作用域（旧库迁移数据为空串，查询时按空串兼容可见）
+    /// Project scope (empty for legacy migrated data; queries treat empty as visible for compatibility)
     pub project_scope: String,
     pub timestamp: String,
 }
 
-/// preferences 记录（对应 PreferenceRecord）
+/// preferences record (matches PreferenceRecord)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PreferenceRecord {
     pub id: String,
@@ -112,12 +112,12 @@ pub struct PreferenceRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_memory_id: Option<String>,
     pub session_id: String,
-    /// 项目作用域（旧库迁移数据为空串，查询时按空串兼容可见）
+    /// Project scope (empty for legacy migrated data; queries treat empty as visible for compatibility)
     pub project_scope: String,
     pub created_at: String,
 }
 
-/// instructions 记录（对应 InstructionRecord）
+/// instructions record (matches InstructionRecord)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstructionRecord {
     pub id: String,
@@ -130,12 +130,12 @@ pub struct InstructionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_memory_id: Option<String>,
     pub session_id: String,
-    /// 项目作用域（旧库迁移数据为空串，查询时按空串兼容可见）
+    /// Project scope (empty for legacy migrated data; queries treat empty as visible for compatibility)
     pub project_scope: String,
     pub created_at: String,
 }
 
-/// timeline 记录（对应 TimelineEventRecord）
+/// timeline record (matches TimelineEventRecord)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TimelineEventRecord {
     pub event_id: String,
@@ -146,12 +146,12 @@ pub struct TimelineEventRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_memory_id: Option<String>,
     pub session_id: String,
-    /// 项目作用域（旧库迁移数据为空串，查询时按空串兼容可见）
+    /// Project scope (empty for legacy migrated data; queries treat empty as visible for compatibility)
     pub project_scope: String,
     pub created_at: String,
 }
 
-/// memory_embeddings 记录（对应 MemoryEmbeddingRecord）
+/// memory_embeddings record (matches MemoryEmbeddingRecord)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryEmbeddingRecord {
     pub memory_kind: MemoryKind,
@@ -160,7 +160,7 @@ pub struct MemoryEmbeddingRecord {
     pub model: String,
 }
 
-/// session_state 记录（对应 SessionStateRecord）
+/// session_state record (matches SessionStateRecord)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionStateRecord {
     pub session_id: String,
@@ -168,3 +168,4 @@ pub struct SessionStateRecord {
     pub last_retained_user_turn: i64,
     pub has_recalled_for_first_turn: bool,
 }
+

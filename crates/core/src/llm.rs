@@ -1,27 +1,27 @@
-//! LLM 提示模板与结果解析（对应 TS 版 prompts/ + fromJsonPayload）。
+//! LLM prompt templates and result parsing (matches the TS prompts/ + fromJsonPayload).
 //!
-//! LLM 输出由 TS 侧生成后作为 `llmResult` 传入（保持单向 RPC），
-//! Rust 负责解析与降级：解析失败 → 规则路径。
+//! The LLM output is generated on the TS side and passed in as `llmResult` (one-way RPC);
+//! Rust parses it and degrades to the rule path when parsing fails.
 
 use crate::models::{FactRecord, InstructionRecord, PreferenceRecord, TimelineEventRecord};
 
-/// 结构化提取提示（对应 extract-structured.md，明确 JSON 输出格式）。
-pub const EXTRACT_PROMPT: &str = r#"请从下方会话片段中抽取 facts、preferences、instructions、timeline 四类结构化记忆，并**只返回 JSON**（不要任何其他文字、解释或 markdown）：
+/// Structured extraction prompt (matches extract-structured.md; requires strict JSON output).
+pub const EXTRACT_PROMPT: &str = r#"Extract structured memories (facts, preferences, instructions, timeline) from the conversation snippet below. Return **only JSON** (no other text, explanation, or markdown):
 {
-  "facts": [{"subject": "主语", "predicate": "谓语", "object": "宾语"}],
-  "preferences": [{"preference": "偏好描述", "topic": "主题"}],
-  "instructions": [{"instruction": "指令内容", "topic": "主题"}],
-  "timeline": [{"date": "YYYY-MM-DD", "description": "事件描述"}]
+  "facts": [{"subject": "subject", "predicate": "predicate", "object": "object"}],
+  "preferences": [{"preference": "preference text", "topic": "topic"}],
+  "instructions": [{"instruction": "instruction text", "topic": "topic"}],
+  "timeline": [{"date": "YYYY-MM-DD", "description": "event description"}]
 }
-规则：无法可靠抽取的类别返回空数组；不要编造；只输出 JSON 本身。
+Rules: return an empty array for categories you cannot reliably extract; do not fabricate; output the JSON only.
 
-会话片段："#;
+Conversation snippet:"#;
 
-/// 会话整合提示（对应 consolidate-session.md）。
-pub const CONSOLIDATE_PROMPT: &str = r#"请把本次 session 的 working memory 总结为 1 条可复用的 episodic memory；若信息不足，请返回简洁摘要，不要阻塞流程。"#;
+/// Session consolidation prompt (matches consolidate-session.md).
+pub const CONSOLIDATE_PROMPT: &str = r#"Summarize this session's working memory into 1 reusable episodic memory; if there is not enough information, return a concise summary and do not block the flow."#;
 
-/// 解析 LLM 返回的结构化 JSON（对应 fromJsonPayload）。
-/// 返回 None 表示解析失败（调用方降级规则路径）。
+/// Parse the structured JSON returned by the LLM (matches fromJsonPayload).
+/// Returns None when parsing fails (the caller degrades to the rule path).
 #[derive(Debug, Clone, Default)]
 pub struct LlmExtractionResult {
     pub facts: Vec<FactRecord>,
@@ -30,8 +30,8 @@ pub struct LlmExtractionResult {
     pub timeline: Vec<TimelineEventRecord>,
 }
 
-/// 从 LLM JSON 输出解析结构化记忆；解析失败返回默认空结果。
-/// 注意：LLM 返回的 id/sessionId 等字段由调用方补齐（LLM 只给内容字段）。
+/// Parse the structured JSON returned by the LLM; returns a default empty result on parse failure.
+/// Note: id/sessionId fields absent from the LLM output are filled in by the caller (the LLM only provides content fields).
 pub fn parse_llm_extraction(payload: &str) -> LlmExtractionResult {
     let parsed: serde_json::Value = match serde_json::from_str(payload) {
         Ok(v) => v,

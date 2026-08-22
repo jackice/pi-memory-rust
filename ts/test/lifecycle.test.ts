@@ -94,7 +94,7 @@ async function emitSessionShutdown(pi: FakePi, event: any, ctx: any) {
   await handler!(event, ctx);
 }
 
-test("session_shutdown 在 quit 时询问，用户确认后才总结", async () => {
+test("session_shutdown asks on quit and summarizes after user confirmation", async () => {
   mockClientMethods();
   const pi = new FakePi();
   registerPiMemoryRustExtension(pi as any, {});
@@ -103,7 +103,7 @@ test("session_shutdown 在 quit 时询问，用户确认后才总结", async () 
   await emitSessionShutdown(pi, { reason: "quit" }, ctx);
 
   expect(confirmCalls.length).toBe(1);
-  expect(confirmCalls[0][0]).toContain("总结");
+  expect(confirmCalls[0][0]).toContain("Summarize");
   expect(confirmCalls[0][2]?.timeout).toBeDefined();
   expect(callLog.map(([method]) => method)).toEqual([
     "llmPrompts",
@@ -113,7 +113,7 @@ test("session_shutdown 在 quit 时询问，用户确认后才总结", async () 
   expect(shutdownCount).toBe(1);
 });
 
-test("session_shutdown 在 quit 时默认不总结", async () => {
+test("session_shutdown defaults to no summary on quit", async () => {
   mockClientMethods();
   const pi = new FakePi();
   registerPiMemoryRustExtension(pi as any, {});
@@ -126,7 +126,7 @@ test("session_shutdown 在 quit 时默认不总结", async () => {
   expect(shutdownCount).toBe(1);
 });
 
-test("session_shutdown 在非 quit 场景不询问也不总结", async () => {
+test("session_shutdown neither asks nor summarizes on non-quit", async () => {
   mockClientMethods();
   const pi = new FakePi();
   registerPiMemoryRustExtension(pi as any, {});
@@ -139,7 +139,7 @@ test("session_shutdown 在非 quit 场景不询问也不总结", async () => {
   expect(shutdownCount).toBe(1);
 });
 
-test("session_shutdown 在无 UI 场景不询问也不总结", async () => {
+test("session_shutdown neither asks nor summarizes without UI", async () => {
   mockClientMethods();
   const pi = new FakePi();
   registerPiMemoryRustExtension(pi as any, {});
@@ -152,7 +152,7 @@ test("session_shutdown 在无 UI 场景不询问也不总结", async () => {
   expect(shutdownCount).toBe(1);
 });
 
-test("session_shutdown 在 quit 时 LLM 超时也会结束并关闭客户端", async () => {
+test("session_shutdown still exits and closes the client when the LLM times out on quit", async () => {
   mockClientMethods();
   const pi = new FakePi();
   registerPiMemoryRustExtension(pi as any, {});
@@ -172,7 +172,7 @@ test("session_shutdown 在 quit 时 LLM 超时也会结束并关闭客户端", a
   expect(shutdownCount).toBe(1);
 });
 
-test("turn_end 的 LLM 提取不被 1s 超时误杀（慢模型仍传 llmResult）", async () => {
+test("turn_end LLM extraction is not killed by the 1s timeout (slow model still passes llmResult)", async () => {
   const prevEnv = process.env.PI_MEMORY_LLM;
   process.env.PI_MEMORY_LLM = "on";
   try {
@@ -183,7 +183,7 @@ test("turn_end 的 LLM 提取不被 1s 超时误杀（慢模型仍传 llmResult�
     (ctx as any).model = { id: "m", provider: "p" };
     (ctx as any).modelRegistry = {
       complete: async () => {
-        // 慢于旧的 1s 关闭超时，但应在 turn 流程的宽松超时内完成
+        // Slower than the old 1s shutdown timeout, but within the generous turn timeout
         await new Promise((resolve) => setTimeout(resolve, 1500));
         return { content: [{ type: "text", text: '{"facts":[{"subject":"s","predicate":"p","object":"o"}]}' }] };
       },
@@ -191,7 +191,7 @@ test("turn_end 的 LLM 提取不被 1s 超时误杀（慢模型仍传 llmResult�
 
     const handler = pi.handlers.get("turn_end")?.[0];
     expect(handler).toBeDefined();
-    await handler!({ message: { content: "测试文本" }, turnIndex: 1 }, ctx);
+    await handler!({ message: { content: "test text" }, turnIndex: 1 }, ctx);
 
     const retain = callLog.find(([method]) => method === "retainTurnMemories");
     expect(retain).toBeDefined();
@@ -205,3 +205,4 @@ test("turn_end 的 LLM 提取不被 1s 超时误杀（慢模型仍传 llmResult�
     }
   }
 });
+

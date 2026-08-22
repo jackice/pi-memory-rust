@@ -1,9 +1,9 @@
-//! recall 多路候选合并排序（移植自 TS 版 `core/recall.ts`，bit-exact）。
+//! Recall multi-source candidate merge/ranking (ported from the TS `core/recall.ts`, bit-exact).
 //!
-//! 保持逐位一致的关键点：
-//! - 合并顺序：fts → embedding → structured（scopeBoost 每路重新赋值）；
-//! - 分数公式：`scopeBoost + fts * 1.5 + embedding + structured`（左结合）；
-//! - 排序 tie-break：totalScore 相等时按 memoryId 比较。
+//! Key points for keeping bit-exact behavior:
+//! - merge order: fts → embedding → structured (scopeBoost reassigned per source);
+//! - score formula: `scopeBoost + fts * 1.5 + embedding + structured` (left-associative);
+//! - tie-break: when totalScore ties, compare memoryId.
 
 use crate::models::MemoryKind;
 
@@ -44,7 +44,7 @@ pub struct RecallMemoriesOptions<'a> {
     pub structured_candidates: &'a [RecallCandidateInput],
 }
 
-/// 合并多路候选并排序截断（对应 recallMemories）。
+/// Merge multi-source candidates, rank, and truncate (matches recallMemories).
 pub fn recall_memories(options: RecallMemoriesOptions) -> Vec<RecallCandidate> {
     let mut merged: Vec<RecallCandidate> = Vec::new();
 
@@ -59,7 +59,7 @@ pub fn recall_memories(options: RecallMemoriesOptions) -> Vec<RecallCandidate> {
     }
 
     merged.sort_by(|left, right| {
-        // 与 TS 排序一致：totalScore 降序，相等时 memoryId 升序（ASCII 下 localeCompare 同字节序）
+        // Matches the TS ordering: totalScore desc, memoryId asc on ties (byte order under ASCII equals localeCompare)
         right
             .total_score
             .partial_cmp(&left.total_score)
@@ -92,7 +92,7 @@ fn merge_candidate(
         Some(index) => &mut merged[index],
         None => {
             merged.push(create_candidate(project_scope, candidate));
-            merged.last_mut().expect("刚 push 必有值")
+            merged.last_mut().expect("just pushed")
         }
     };
 
@@ -158,11 +158,11 @@ mod tests {
         let fts = vec![
             RecallCandidateInput {
                 fts_score: Some(0.7),
-                ..candidate("wm-1", MemoryKind::Working, "pi-memory", "SQLite-first 决策避免引入 Turso")
+                ..candidate("wm-1", MemoryKind::Working, "pi-memory", "SQLite-first decision avoids introducing Turso")
             },
             RecallCandidateInput {
                 fts_score: Some(0.95),
-                ..candidate("wm-2", MemoryKind::Working, "other-project", "别的项目也在讨论 SQLite")
+                ..candidate("wm-2", MemoryKind::Working, "other-project", "another project also discussing SQLite")
             },
         ];
         let results = recall_memories(RecallMemoriesOptions {
@@ -174,7 +174,7 @@ mod tests {
         });
         assert_eq!(results[0].memory_id, "wm-1");
         assert_eq!(results[1].memory_id, "wm-2");
-        // wm-2 的 fts 0.95*1.5 = 1.425 + boost 0；wm-1 0.7*1.5 + 1 = 2.05 → wm-1 在前（scope 优先）
+        // wm-2 fts 0.95*1.5 = 1.425 + boost 0; wm-1 0.7*1.5 + 1 = 2.05 → wm-1 first (scope first)
         assert_eq!(results[0].score_breakdown, RecallScoreBreakdown {
             fts: 0.7, embedding: 0.0, structured: 0.0, scope_boost: 1.0,
         });
@@ -185,20 +185,20 @@ mod tests {
         let fts = vec![
             RecallCandidateInput {
                 fts_score: Some(0.7),
-                ..candidate("wm-1", MemoryKind::Working, "pi-memory", "SQLite-first 决策避免引入 Turso")
+                ..candidate("wm-1", MemoryKind::Working, "pi-memory", "SQLite-first decision avoids introducing Turso")
             },
             RecallCandidateInput {
                 fts_score: Some(0.95),
-                ..candidate("wm-2", MemoryKind::Working, "other-project", "别的项目也在讨论 SQLite")
+                ..candidate("wm-2", MemoryKind::Working, "other-project", "another project also discussing SQLite")
             },
         ];
         let embedding = vec![RecallCandidateInput {
             embedding_score: Some(0.8),
-            ..candidate("ep-1", MemoryKind::Episodic, "pi-memory", "团队确认首版只支持 Pi")
+            ..candidate("ep-1", MemoryKind::Episodic, "pi-memory", "team confirmed the first release targets Pi only")
         }];
         let structured = vec![RecallCandidateInput {
             structured_score: Some(0.6),
-            ..candidate("fact-1", MemoryKind::Fact, "pi-memory", "事实：首版使用本地 SQLite")
+            ..candidate("fact-1", MemoryKind::Fact, "pi-memory", "fact: first release uses local SQLite")
         }];
         let results = recall_memories(RecallMemoriesOptions {
             project_scope: "pi-memory",
@@ -219,11 +219,11 @@ mod tests {
         let fts = vec![
             RecallCandidateInput {
                 fts_score: Some(1.0),
-                ..candidate("b", MemoryKind::Working, "pi-memory", "b 内容")
+                ..candidate("b", MemoryKind::Working, "pi-memory", "b content")
             },
             RecallCandidateInput {
                 fts_score: Some(1.0),
-                ..candidate("a", MemoryKind::Working, "pi-memory", "a 内容")
+                ..candidate("a", MemoryKind::Working, "pi-memory", "a content")
             },
         ];
         let results = recall_memories(RecallMemoriesOptions {
@@ -233,7 +233,8 @@ mod tests {
             embedding_candidates: &[],
             structured_candidates: &[],
         });
-        assert_eq!(results[0].memory_id, "a", "总分相同按 memoryId 升序");
+        assert_eq!(results[0].memory_id, "a", "same score sorts by memoryId ascending");
         assert_eq!(results[1].memory_id, "b");
     }
 }
+

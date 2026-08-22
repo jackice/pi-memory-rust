@@ -1,9 +1,9 @@
 /**
- * pi-memory-rust pi 扩展入口（M3）。
+ * pi-memory-rust pi extension entry point (M3).
  *
- * 职责：绑定 pi 事件、注册 /memory 命令、管理 Rust 常驻进程、LLM 代理。
- * LLM 代理：可选注入 LlmProvider（可基于 pi-ai 的 n() 或外部服务实现），
- * 有则 retain/consolidate 前生成 llmResult 传给 Rust（Rust 解析或降级规则路径）。
+ * Responsibilities: bind pi events, register the /memory command, manage the Rust resident process, LLM proxy.
+ * LLM proxy: an optional LlmProvider (built on pi-ai's n() or an external service);
+ * when present, it produces llmResult for retain/consolidate (Rust parses it or falls back to rules).
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -11,7 +11,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import { MemoryRustClient } from "./src/client.ts";
 import { createPiAiLlmProvider, llmEnabled, type PiAiLlmContext } from "./src/llm.ts";
 
-/** LLM provider 接口（与 pi-memory v0.1.2 的 LlmProvider 对齐）。 */
+/** LLM provider interface (aligned with the pi-memory v0.1.2 LlmProvider). */
 export interface LlmProvider {
   name: string;
   complete(prompt: string): Promise<string>;
@@ -30,7 +30,7 @@ interface CtxLike {
 }
 
 export interface PiMemoryRustOptions {
-  /** LLM 提供者；缺省时 retain/consolidate 走规则路径（llm=off） */
+  /** LLM provider; when absent, retain/consolidate use the rule path (llm=off) */
   llm?: LlmProvider;
 }
 
@@ -48,8 +48,8 @@ export default function registerPiMemoryRustExtension(
 
   const SHUTDOWN_CONFIRM_TIMEOUT_MS = 1500;
   const SHUTDOWN_LLM_TIMEOUT_MS = 1000;
-  // turn_end 提取用宽松超时：1s 会让主流模型几乎必超时、每轮都降级规则路径；
-  // 仅关闭流程用 SHUTDOWN_LLM_TIMEOUT_MS 收紧退出延迟
+  // turn_end extraction uses a generous timeout: 1s would make mainstream models nearly always
+  // time out and silently degrade every turn to the rule path; only the shutdown flow uses SHUTDOWN_LLM_TIMEOUT_MS
   const TURN_LLM_TIMEOUT_MS = 60_000;
 
   function hasShutdownUi(ctx: CtxLike | undefined): ctx is CtxLike & { hasUI: true; ui: Required<Pick<UiLike, "confirm">> } {
@@ -61,8 +61,8 @@ export default function registerPiMemoryRustExtension(
     if (!hasShutdownUi(ctx)) return false;
     try {
       return await ctx.ui.confirm(
-        "结束前是否总结当前 session？",
-        "总结会整理当前 session 的 working 记忆，可能需要一些时间。",
+        "Summarize this session before exiting?",
+        "Summarizing consolidates this session's working memories and may take a moment.",
         { timeout: SHUTDOWN_CONFIRM_TIMEOUT_MS },
       );
     } catch {
@@ -72,7 +72,7 @@ export default function registerPiMemoryRustExtension(
 
   async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
     return await new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`${label} 超时`)), timeoutMs);
+      const timer = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
       timer.unref();
       promise.then(
         (value) => {
@@ -88,10 +88,10 @@ export default function registerPiMemoryRustExtension(
   }
 
   /**
-   * 解析 LLM provider：
-   * 1. 显式注入（options.llm）；
-   * 2. 默认用 pi-ai（当前会话模型），`PI_MEMORY_LLM=off` 可关闭（保持规则路径）；
-   * 3. 无可用模型时返回 undefined（降级规则路径）。
+   * Resolve the LLM provider:
+   * 1. explicit injection (options.llm);
+   * 2. default to pi-ai (the current session model); `PI_MEMORY_LLM=off` disables it (staying on the rule path);
+   * 3. returns undefined without an available model (degrading to the rule path).
    */
   function resolveLlm(ctx: unknown): LlmProvider | undefined {
     if (options.llm) return options.llm;
@@ -108,7 +108,7 @@ export default function registerPiMemoryRustExtension(
     const provider = resolveLlm(ctx);
     if (!provider) return { failed: false };
     try {
-      return { result: await withTimeout(provider.complete(prompt), timeoutMs, "LLM 总结"), failed: false };
+      return { result: await withTimeout(provider.complete(prompt), timeoutMs, "LLM"), failed: false };
     } catch {
       return { failed: true };
     }
@@ -126,7 +126,7 @@ export default function registerPiMemoryRustExtension(
     try {
       if (await shouldSummarizeOnShutdown(event, ctx as CtxLike | undefined)) {
         await ensurePrompts(SHUTDOWN_LLM_TIMEOUT_MS);
-        // LLM 输入：当前 session 未 consolidated 的 working 内容
+        // LLM input: this session's un-consolidated working content
         const source = await client.call<string>("consolidateSource", {
           sessionId: resolveSessionId(ctx),
           projectScope: resolveProjectScope(ctx),
@@ -186,7 +186,7 @@ export default function registerPiMemoryRustExtension(
   });
 
   pi.registerCommand("memory", {
-    description: "pi-memory-rust 记忆维护（view/stats/diagnose/clear/rebuild/migrate/prepare-model）",
+    description: "pi-memory-rust memory maintenance (view/stats/diagnose/clear/rebuild/migrate/prepare-model)",
     handler: async (args, ctx) => {
       const [sub, ...rest] = (args ?? "").split(/\s+/).filter(Boolean);
       try {
@@ -203,7 +203,7 @@ export default function registerPiMemoryRustExtension(
             projectScope: resolveProjectScope(ctx),
           });
         }
-        // diagnose 时附上 TS 侧真实 LLM 状态（Rust 侧无法感知 pi 的 provider）
+        // Attach the real TS-side LLM status for diagnose (the Rust side cannot see pi's provider)
         if (sub === "diagnose") {
           const llm = resolveLlm(ctx);
           result += ` llm=${llm ? llm.name : "off"}`;
@@ -241,3 +241,4 @@ function notify(ctx: { ui?: UiLike } | undefined, phase: string, error: unknown)
   const message = error instanceof Error ? error.message : String(error);
   ctx?.ui?.notify?.(`pi-memory-rust ${phase} degraded: ${message}`, "warning");
 }
+
