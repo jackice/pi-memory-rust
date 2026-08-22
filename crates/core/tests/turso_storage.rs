@@ -385,3 +385,50 @@ fn concurrent_write_waits_with_busy_timeout() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn large_multi_transaction_writes_are_stable() {
+    // 回归防护：多事务大写入（facts 1 万条 + working 1 万条，drop_fts 后）在默认配置下
+    // 必须不 panic、不卡死、数据完整。若 libSQL multiprocess WAL 被误开启，
+    // 此场景会触发 "shared WAL frame ids must increase monotonically" panic。
+    let path = temp_db_path("turso-large-tx.db");
+    let _ = std::fs::remove_file(&path);
+    let db = TursoStorage::open(&path).expect("open");
+    db.drop_fts().expect("drop fts"); // 规避 FTS 批量写入悬崖（与 migrate/bench 同一策略）
+
+    // 事务 1：facts 1 万条
+    let mut facts = Vec::with_capacity(10_000);
+    for i in 0..10_000 {
+        facts.push(FactRecord {
+            fact_id: format!("f{i}"), subject: format!("用户{i}"), predicate: "使用".into(),
+            object: format!("特性{i}"), confidence: 0.8, source_memory_id: None,
+            session_id: "s1".into(), project_scope: "/p".into(), timestamp: "2026-08-21".into(),
+        });
+    }
+    db.begin_tx().expect("begin 1");
+    db.insert_facts(&facts).expect("insert facts");
+    db.commit_tx().expect("commit 1");
+
+    // 事务 2：working 1 万条
+    db.begin_tx().expect("begin 2");
+    let ts = "2026-08-21T00:00:00.000Z".to_string();
+    for i in 0..10_000 {
+        db.insert_working(&WorkingMemoryRecord {
+            id: format!("w{i}"), content: format!("alpha 内容 {i:05}"), embed_text: None,
+            source: Some("t".into()), session_id: "s1".into(), project_scope: "/p".into(),
+            importance: 0.5, memory_type: "working".into(), metadata: None,
+            created_at: ts.clone(), updated_at: ts.clone(), consolidated_at: None,
+            valid_until: None, superseded_by: None,
+        }).expect("insert working");
+    }
+    db.commit_tx().expect("commit 2");
+
+    // 数据完整 + FTS 重建后可搜
+    assert_eq!(db.list_all_facts().expect("facts").len(), 10_000);
+    assert_eq!(db.list_working_by_project("/p").expect("working").len(), 10_000);
+    db.rebuild_fts().expect("rebuild fts");
+    let hits = db.search_working_fts("alpha", "/p").expect("fts");
+    assert!(hits.len() >= 10_000, "FTS 应命中全部（实际 {}）", hits.len());
+
+    let _ = std::fs::remove_file(&path);
+}

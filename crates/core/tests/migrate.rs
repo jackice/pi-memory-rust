@@ -59,3 +59,39 @@ fn migrate_old_db_preserves_data_and_fts() {
     let _ = std::fs::remove_file(&old);
     let _ = std::fs::remove_file(&new);
 }
+
+#[test]
+fn migrate_large_db_completes_and_fts_works() {
+    // 回归防护：大库迁移（2 万条）必须在有限时间内完成、数据完整、FTS 可搜。
+    // 曾因 libSQL multiprocess WAL 在多事务大写入下 panic（frame id 单调性）导致迁移崩溃。
+    let old = temp_db("migrate-large-old.db");
+    let old_storage = TursoStorage::open(&old).expect("旧库打开失败");
+    // 旧库无 Tantivy FTS 索引（drop_fts 模拟），避免批量写入触发 FTS 索引逐条更新悬崖
+    old_storage.drop_fts().expect("drop fts");
+    old_storage.begin_tx().expect("begin");
+    for i in 0..20_000 {
+        old_storage
+            .insert_working(&wm(&format!("w{i}"), &format!("迁移内容 alpha {i:05}"), "/proj/demo"))
+            .expect("insert");
+    }
+    old_storage.commit_tx().expect("commit");
+    drop(old_storage);
+
+    let new = temp_db("migrate-large-new.db");
+    let new_storage = TursoStorage::open(&new).expect("新库打开失败");
+    let started = std::time::Instant::now();
+    let stats = new_storage.migrate_from(&old).expect("大库迁移失败");
+    assert_eq!(stats["working"], 20_000, "全部 working 应迁移");
+    assert!(
+        started.elapsed().as_secs() < 60,
+        "2 万条迁移应在 60s 内完成（实测 ~0.4s），当前 {:?}",
+        started.elapsed()
+    );
+
+    let hits = new_storage.search_working_fts("alpha", "/proj/demo").expect("FTS 失败");
+    assert!(!hits.is_empty(), "迁移后 FTS 应可命中");
+    assert!(hits.len() >= 20_000, "应命中全部 2 万条（实际 {}）", hits.len());
+
+    let _ = std::fs::remove_file(&old);
+    let _ = std::fs::remove_file(&new);
+}
