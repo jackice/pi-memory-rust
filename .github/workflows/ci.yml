@@ -16,9 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
+      - name: Install Rust toolchain (match rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.97.1"
           components: clippy
 
       - name: Cache cargo
