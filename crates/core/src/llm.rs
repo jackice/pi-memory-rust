@@ -46,6 +46,7 @@ pub fn parse_llm_extraction(payload: &str) -> LlmExtractionResult {
             confidence: v.get("confidence").and_then(|x| x.as_f64()).unwrap_or(0.5),
             source_memory_id: None,
             session_id: String::new(),
+            project_scope: String::new(),
             timestamp: String::new(),
         }),
         preferences: parse_list(&parsed, "preferences", |v| PreferenceRecord {
@@ -55,6 +56,7 @@ pub fn parse_llm_extraction(payload: &str) -> LlmExtractionResult {
             context_snippet: None,
             source_memory_id: None,
             session_id: String::new(),
+            project_scope: String::new(),
             created_at: String::new(),
         }),
         instructions: parse_list(&parsed, "instructions", |v| InstructionRecord {
@@ -65,6 +67,7 @@ pub fn parse_llm_extraction(payload: &str) -> LlmExtractionResult {
             context_snippet: None,
             source_memory_id: None,
             session_id: String::new(),
+            project_scope: String::new(),
             created_at: String::new(),
         }),
         timeline: parse_list(&parsed, "timeline", |v| TimelineEventRecord {
@@ -74,6 +77,7 @@ pub fn parse_llm_extraction(payload: &str) -> LlmExtractionResult {
             source: None,
             source_memory_id: None,
             session_id: String::new(),
+            project_scope: String::new(),
             created_at: String::new(),
         }),
     }

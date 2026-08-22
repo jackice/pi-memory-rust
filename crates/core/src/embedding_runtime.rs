@@ -35,6 +35,8 @@ enum EmbedderState {
 #[derive(Clone)]
 pub struct SharedEmbedder {
     inner: Arc<Mutex<EmbedderState>>,
+    /// 后台 warmup 加载线程句柄（进程退出前 join，避免与 ONNX 全局初始化竞态）。
+    loading_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     model_dir: PathBuf,
 }
 
@@ -48,6 +50,7 @@ impl SharedEmbedder {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(EmbedderState::Unloaded)),
+            loading_handle: Arc::new(Mutex::new(None)),
             model_dir: default_model_dir(),
         }
     }
@@ -57,14 +60,15 @@ impl SharedEmbedder {
         crate::model_download::model_dir_complete(&self.model_dir)
     }
 
-    /// 后台预热模型；未就绪或已有加载任务时立即返回。
+    /// 后台预热模型；未就绪、已有加载任务或加载失败（Failed 可在文件修复后重试）时立即返回。
     pub fn warmup(&self) {
         if !self.model_ready() {
             return;
         }
         let should_start = {
             let mut state = self.inner.lock().expect("锁中毒");
-            if matches!(*state, EmbedderState::Unloaded) {
+            // Unloaded 与 Failed 都允许启动：Failed 是临时态，模型文件修复后可重试恢复
+            if matches!(*state, EmbedderState::Unloaded | EmbedderState::Failed) {
                 *state = EmbedderState::Loading;
                 true
             } else {
@@ -76,7 +80,7 @@ impl SharedEmbedder {
         }
         let inner = Arc::clone(&self.inner);
         let model_dir = self.model_dir.clone();
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let loaded = Embedder::load(&model_dir);
             let mut state = inner.lock().expect("锁中毒");
             match loaded {
@@ -93,6 +97,14 @@ impl SharedEmbedder {
                 }
             }
         });
+        *self.loading_handle.lock().expect("锁中毒") = Some(handle);
+    }
+
+    /// 等待后台 warmup 加载线程结束（进程退出前调用，避免与 ONNX 全局初始化竞态导致 SIGSEGV）。
+    pub fn join_background_load(&self) {
+        if let Some(handle) = self.loading_handle.lock().expect("锁中毒").take() {
+            let _ = handle.join();
+        }
     }
 
     /// 确保已加载；后台加载进行中时立即返回 false，让调用方走 FTS-only。
@@ -101,8 +113,10 @@ impl SharedEmbedder {
             let mut state = self.inner.lock().expect("锁中毒");
             match &*state {
                 EmbedderState::Ready(_) => return true,
-                EmbedderState::Loading | EmbedderState::Failed => return false,
-                EmbedderState::Unloaded => {
+                // 后台加载进行中：不重复加载，调用方降级 FTS-only
+                EmbedderState::Loading => return false,
+                // Failed 视为可重试：模型文件修复后允许同步重新加载
+                EmbedderState::Unloaded | EmbedderState::Failed => {
                     if !self.model_ready() {
                         return false;
                     }
@@ -202,6 +216,8 @@ impl ProjectVectors {
         let mut vectors: Vec<Vec<f32>> = Vec::new();
         let mut ids: Vec<u64> = Vec::new();
         let mut items: Vec<(MemoryKind, String, String)> = Vec::new();
+        // 一次性取 id 起点，按实际入索引数量连续分配（不依赖迭代过程中的 next_id 读取）
+        let id_base = self.index.next_id_hint();
         for embedding in storage.list_all_embeddings()? {
             let content = match embedding.memory_kind {
                 MemoryKind::Working => working.get(&embedding.memory_id).cloned(),
@@ -215,7 +231,7 @@ impl ProjectVectors {
                 continue;
             }
             let vector = embedding.embedding.iter().map(|&v| v as f32).collect::<Vec<_>>();
-            let id = self.index.next_id_hint() + items.len() as u64;
+            let id = id_base + ids.len() as u64;
             vectors.push(vector);
             ids.push(id);
             items.push((embedding.memory_kind, embedding.memory_id, content));

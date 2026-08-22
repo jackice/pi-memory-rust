@@ -48,7 +48,7 @@ test("端到端：retain → recall → consolidate → 命令", async () => {
   const diag = await client.call<string>("memoryCommand", {
     sub: "diagnose", target: "", sessionId: "s1", projectScope: scope,
   });
-  expect(diag).toMatch(/embedding=(on|off|model-error)/);
+  expect(diag).toMatch(/embedding=(on|off|loading|model-error)/);
 
   await client.shutdown();
 });

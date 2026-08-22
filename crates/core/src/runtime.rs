@@ -142,6 +142,7 @@ pub fn retain_turn_memories(
                 }
                 fact.source_memory_id = Some(memory_id.clone());
                 fact.session_id = session_id.to_string();
+                fact.project_scope = project_scope.to_string();
                 if fact.timestamp.is_empty() {
                     fact.timestamp = crate::core::extraction::EPOCH_ISO.to_string();
                 }
@@ -152,6 +153,7 @@ pub fn retain_turn_memories(
                 }
                 preference.source_memory_id = Some(memory_id.clone());
                 preference.session_id = session_id.to_string();
+                preference.project_scope = project_scope.to_string();
                 if preference.created_at.is_empty() {
                     preference.created_at = crate::core::extraction::EPOCH_ISO.to_string();
                 }
@@ -162,6 +164,7 @@ pub fn retain_turn_memories(
                 }
                 instruction.source_memory_id = Some(memory_id.clone());
                 instruction.session_id = session_id.to_string();
+                instruction.project_scope = project_scope.to_string();
                 if instruction.created_at.is_empty() {
                     instruction.created_at = crate::core::extraction::EPOCH_ISO.to_string();
                 }
@@ -173,6 +176,7 @@ pub fn retain_turn_memories(
                 event.source = Some("llm".into());
                 event.source_memory_id = Some(memory_id.clone());
                 event.session_id = session_id.to_string();
+                event.project_scope = project_scope.to_string();
                 if event.created_at.is_empty() {
                     event.created_at = crate::core::extraction::EPOCH_ISO.to_string();
                 }
@@ -183,6 +187,7 @@ pub fn retain_turn_memories(
             let rule = extract_with_heuristics(&ExtractStructuredMemoriesOptions {
                 retained_turn_id: memory_id.clone(),
                 session_id: session_id.to_string(),
+                project_scope: project_scope.to_string(),
                 text: text.to_string(),
             });
             crate::llm::LlmExtractionResult {
@@ -413,7 +418,7 @@ fn query_structured_candidates(
 ) -> anyhow::Result<Vec<RecallCandidateInput>> {
     // 对应 queryStructuredCandidates：facts/instructions/preferences/timeline LIKE 查询
     let mut candidates = Vec::new();
-    for fact in storage.search_facts_like(query_text)? {
+    for fact in storage.search_facts_like(query_text, project_scope)? {
         candidates.push(RecallCandidateInput {
             memory_id: fact.fact_id,
             memory_kind: MemoryKind::Fact,
@@ -424,7 +429,7 @@ fn query_structured_candidates(
             structured_score: Some(0.6),
         });
     }
-    for instruction in storage.search_instructions_like(query_text)? {
+    for instruction in storage.search_instructions_like(query_text, project_scope)? {
         candidates.push(RecallCandidateInput {
             memory_id: instruction.id,
             memory_kind: MemoryKind::Instruction,
@@ -435,7 +440,7 @@ fn query_structured_candidates(
             structured_score: Some(0.5),
         });
     }
-    for preference in storage.search_preferences_like(query_text)? {
+    for preference in storage.search_preferences_like(query_text, project_scope)? {
         candidates.push(RecallCandidateInput {
             memory_id: preference.id,
             memory_kind: MemoryKind::Preference,
@@ -446,7 +451,7 @@ fn query_structured_candidates(
             structured_score: Some(0.5),
         });
     }
-    for event in storage.search_timeline_like(query_text)? {
+    for event in storage.search_timeline_like(query_text, project_scope)? {
         candidates.push(RecallCandidateInput {
             memory_id: event.event_id,
             memory_kind: MemoryKind::Timeline,

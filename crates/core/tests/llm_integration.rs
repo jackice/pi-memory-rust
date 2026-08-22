@@ -35,7 +35,7 @@ fn retain_parses_llm_result_and_upserts_structured() {
     assert_eq!(storage.count_by_session("instructions", "s1").unwrap(), 1);
     assert_eq!(storage.count_by_session("timeline", "s1").unwrap(), 1);
 
-    let facts = storage.search_facts_like("Rust").unwrap();
+    let facts = storage.search_facts_like("Rust", "/tmp/llm").unwrap();
     assert_eq!(facts[0].subject, "项目");
     assert_eq!(facts[0].predicate, "采用");
     // 补全字段
@@ -56,7 +56,7 @@ fn retain_invalid_llm_result_falls_back_to_rules() {
     .expect("retain 失败");
 
     assert_eq!(storage.count_by_session("facts", "s1").unwrap(), 1, "应降级规则提取");
-    let facts = storage.search_facts_like("SQLite").unwrap();
+    let facts = storage.search_facts_like("SQLite", "/tmp/llm").unwrap();
     assert_eq!(facts[0].subject, "首版");
     assert_eq!(facts[0].predicate, "正式采用");
 }

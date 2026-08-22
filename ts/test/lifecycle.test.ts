@@ -171,3 +171,37 @@ test("session_shutdown 在 quit 时 LLM 超时也会结束并关闭客户端", a
   ]);
   expect(shutdownCount).toBe(1);
 });
+
+test("turn_end 的 LLM 提取不被 1s 超时误杀（慢模型仍传 llmResult）", async () => {
+  const prevEnv = process.env.PI_MEMORY_LLM;
+  process.env.PI_MEMORY_LLM = "on";
+  try {
+    mockClientMethods();
+    const pi = new FakePi();
+    registerPiMemoryRustExtension(pi as any, {});
+    const ctx = makeCtx(false, true).ctx;
+    (ctx as any).model = { id: "m", provider: "p" };
+    (ctx as any).modelRegistry = {
+      complete: async () => {
+        // 慢于旧的 1s 关闭超时，但应在 turn 流程的宽松超时内完成
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        return { content: [{ type: "text", text: '{"facts":[{"subject":"s","predicate":"p","object":"o"}]}' }] };
+      },
+    };
+
+    const handler = pi.handlers.get("turn_end")?.[0];
+    expect(handler).toBeDefined();
+    await handler!({ message: { content: "测试文本" }, turnIndex: 1 }, ctx);
+
+    const retain = callLog.find(([method]) => method === "retainTurnMemories");
+    expect(retain).toBeDefined();
+    expect((retain![1] as { llmResult?: unknown }).llmResult).toContain("facts");
+    expect((retain![1] as { llmFailed?: unknown }).llmFailed).toBe(false);
+  } finally {
+    if (prevEnv === undefined) {
+      delete process.env.PI_MEMORY_LLM;
+    } else {
+      process.env.PI_MEMORY_LLM = prevEnv;
+    }
+  }
+});

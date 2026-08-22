@@ -105,3 +105,60 @@ fn hydrate_rebuilds_project_vector_index() {
     assert!(!hits.is_empty(), "hydrate 后应恢复可检索向量");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn clear_then_rebuild_drops_stale_vectors() {
+    // 模拟 server 的 /memory clear 流程：清 DB（含 embeddings 表）后重建 ProjectVectors，
+    // 避免内存索引残留导致 recall 注入已删除记忆。
+    let dir = std::env::temp_dir().join("pi-memory-rust-test-clear");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db_path = dir.join("memory.db");
+    let db = TursoStorage::open(db_path.to_str().unwrap()).unwrap();
+    let ts = "2026-08-21T00:00:00.000Z".to_string();
+    db.insert_working(&WorkingMemoryRecord {
+        id: "wm-1".into(),
+        content: "团队使用 Rust 开发后端服务".into(),
+        embed_text: Some("团队使用 Rust 开发后端服务".into()),
+        source: Some("test".into()),
+        session_id: "s1".into(),
+        project_scope: "/p".into(),
+        importance: 0.5,
+        memory_type: "working".into(),
+        metadata: None,
+        created_at: ts.clone(),
+        updated_at: ts,
+        consolidated_at: None,
+        valid_until: None,
+        superseded_by: None,
+    })
+    .unwrap();
+    db.save_embedding(&MemoryEmbeddingRecord {
+        memory_kind: MemoryKind::Working,
+        memory_id: "wm-1".into(),
+        embedding: vec![0.5; 384],
+        model: "model".into(),
+    })
+    .unwrap();
+
+    let mut vectors = ProjectVectors::new().unwrap();
+    vectors.hydrate(&db).unwrap();
+    let shared = pi_memory_core::embedding_runtime::SharedEmbedder::new();
+    assert!(
+        !vectors
+            .build_embedding_candidates(&shared, "Rust", &[(MemoryKind::Working, "wm-1".into())])
+            .unwrap()
+            .is_empty(),
+        "clear 前应可命中"
+    );
+
+    // clear 只清 DB；server 侧随后重建 ProjectVectors（hydrate 空库 → 空索引）
+    db.clear_project_memories("/p").unwrap();
+    let mut rebuilt = ProjectVectors::new().unwrap();
+    rebuilt.hydrate(&db).unwrap();
+    let hits = rebuilt
+        .build_embedding_candidates(&shared, "Rust", &[(MemoryKind::Working, "wm-1".into())])
+        .unwrap();
+    assert!(hits.is_empty(), "clear 并重建后不应命中已删除记忆");
+    let _ = std::fs::remove_dir_all(&dir);
+}

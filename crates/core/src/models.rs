@@ -95,6 +95,8 @@ pub struct FactRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_memory_id: Option<String>,
     pub session_id: String,
+    /// 项目作用域（旧库迁移数据为空串，查询时按空串兼容可见）
+    pub project_scope: String,
     pub timestamp: String,
 }
 
@@ -110,6 +112,8 @@ pub struct PreferenceRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_memory_id: Option<String>,
     pub session_id: String,
+    /// 项目作用域（旧库迁移数据为空串，查询时按空串兼容可见）
+    pub project_scope: String,
     pub created_at: String,
 }
 
@@ -126,6 +130,8 @@ pub struct InstructionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_memory_id: Option<String>,
     pub session_id: String,
+    /// 项目作用域（旧库迁移数据为空串，查询时按空串兼容可见）
+    pub project_scope: String,
     pub created_at: String,
 }
 
@@ -140,6 +146,8 @@ pub struct TimelineEventRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_memory_id: Option<String>,
     pub session_id: String,
+    /// 项目作用域（旧库迁移数据为空串，查询时按空串兼容可见）
+    pub project_scope: String,
     pub created_at: String,
 }
 

@@ -134,6 +134,7 @@ fn turso_structured_tables_crud() {
             confidence: 0.9,
             source_memory_id: Some("wm-1".into()),
             session_id: "sess-1".into(),
+            project_scope: "/p".into(),
             timestamp: "2026-08-21".into(),
         }])
         .unwrap();
@@ -145,6 +146,7 @@ fn turso_structured_tables_crud() {
             context_snippet: None,
             source_memory_id: None,
             session_id: "sess-1".into(),
+            project_scope: "/p".into(),
             created_at: "2026-08-21".into(),
         }])
         .unwrap();
@@ -157,6 +159,7 @@ fn turso_structured_tables_crud() {
             context_snippet: None,
             source_memory_id: None,
             session_id: "sess-1".into(),
+            project_scope: "/p".into(),
             created_at: "2026-08-21".into(),
         }])
         .unwrap();
@@ -168,6 +171,7 @@ fn turso_structured_tables_crud() {
             source: Some("session".into()),
             source_memory_id: None,
             session_id: "sess-1".into(),
+            project_scope: "/p".into(),
             created_at: "2026-08-21".into(),
         }])
         .unwrap();
@@ -177,6 +181,65 @@ fn turso_structured_tables_crud() {
     assert_eq!(storage.count_by_session("instructions", "sess-1").unwrap(), 1);
     assert_eq!(storage.count_by_session("timeline", "sess-1").unwrap(), 1);
     assert_eq!(storage.count_by_session("facts", "other-session").unwrap(), 0);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn structured_search_filters_by_project_scope() {
+    let path = temp_db_path("turso-scope.db");
+    let _ = std::fs::remove_file(&path);
+    let storage = TursoStorage::open(&path).expect("打开失败");
+
+    // 项目 A 与项目 B 各一条 facts
+    storage
+        .insert_facts(&[FactRecord {
+            fact_id: "f-a".into(),
+            subject: "项目A".into(),
+            predicate: "使用".into(),
+            object: "Rust".into(),
+            confidence: 0.9,
+            source_memory_id: None,
+            session_id: "sess-a".into(),
+            project_scope: "/proj/a".into(),
+            timestamp: "2026-08-21".into(),
+        }])
+        .unwrap();
+    storage
+        .insert_facts(&[FactRecord {
+            fact_id: "f-b".into(),
+            subject: "项目B".into(),
+            predicate: "使用".into(),
+            object: "Rust".into(),
+            confidence: 0.9,
+            source_memory_id: None,
+            session_id: "sess-b".into(),
+            project_scope: "/proj/b".into(),
+            timestamp: "2026-08-21".into(),
+        }])
+        .unwrap();
+
+    let in_a = storage.search_facts_like("Rust", "/proj/a").unwrap();
+    assert_eq!(in_a.len(), 1, "项目 A 只应命中自己的 facts");
+    assert_eq!(in_a[0].fact_id, "f-a");
+    assert_eq!(in_a[0].project_scope, "/proj/a");
+
+    // 旧库迁移数据（project_scope 为空串）兼容可见，不因隔离而消失
+    storage
+        .insert_facts(&[FactRecord {
+            fact_id: "f-legacy".into(),
+            subject: "旧数据".into(),
+            predicate: "标记".into(),
+            object: "legacy".into(),
+            confidence: 0.9,
+            source_memory_id: None,
+            session_id: "sess-legacy".into(),
+            project_scope: String::new(),
+            timestamp: "2026-08-21".into(),
+        }])
+        .unwrap();
+    let in_a_legacy = storage.search_facts_like("legacy", "/proj/a").unwrap();
+    assert_eq!(in_a_legacy.len(), 1, "空 scope 旧数据应兼容可见");
 
     let _ = std::fs::remove_file(&path);
 }

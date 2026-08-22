@@ -12,6 +12,7 @@ pub const EPOCH_ISO: &str = "1970-01-01T00:00:00.000Z";
 pub struct ExtractStructuredMemoriesOptions {
     pub retained_turn_id: String,
     pub session_id: String,
+    pub project_scope: String,
     pub text: String,
 }
 
@@ -53,6 +54,7 @@ pub fn extract_with_heuristics(options: &ExtractStructuredMemoriesOptions) -> St
                 context_snippet: Some((*line).to_string()),
                 source_memory_id: Some(options.retained_turn_id.clone()),
                 session_id: options.session_id.clone(),
+                project_scope: options.project_scope.clone(),
                 created_at: EPOCH_ISO.into(),
             });
             continue;
@@ -68,6 +70,7 @@ pub fn extract_with_heuristics(options: &ExtractStructuredMemoriesOptions) -> St
                 context_snippet: Some((*line).to_string()),
                 source_memory_id: Some(options.retained_turn_id.clone()),
                 session_id: options.session_id.clone(),
+                project_scope: options.project_scope.clone(),
                 created_at: EPOCH_ISO.into(),
             });
             continue;
@@ -84,6 +87,7 @@ pub fn extract_with_heuristics(options: &ExtractStructuredMemoriesOptions) -> St
                 source: Some("retained-turn".into()),
                 source_memory_id: Some(options.retained_turn_id.clone()),
                 session_id: options.session_id.clone(),
+                project_scope: options.project_scope.clone(),
                 created_at: EPOCH_ISO.into(),
             });
             continue;
@@ -106,6 +110,7 @@ fn create_fact(options: &ExtractStructuredMemoriesOptions, index: usize, stateme
         confidence: 0.8,
         source_memory_id: Some(options.retained_turn_id.clone()),
         session_id: options.session_id.clone(),
+        project_scope: options.project_scope.clone(),
         timestamp: EPOCH_ISO.into(),
     }
 }
@@ -183,6 +188,7 @@ mod tests {
         ExtractStructuredMemoriesOptions {
             retained_turn_id: "wm-1".into(),
             session_id: "session-1".into(),
+            project_scope: "/p".into(),
             text: text.into(),
         }
     }

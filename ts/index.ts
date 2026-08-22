@@ -48,6 +48,9 @@ export default function registerPiMemoryRustExtension(
 
   const SHUTDOWN_CONFIRM_TIMEOUT_MS = 3000;
   const SHUTDOWN_LLM_TIMEOUT_MS = 1000;
+  // turn_end 提取用宽松超时：1s 会让主流模型几乎必超时、每轮都降级规则路径；
+  // 仅关闭流程用 SHUTDOWN_LLM_TIMEOUT_MS 收紧退出延迟
+  const TURN_LLM_TIMEOUT_MS = 60_000;
 
   function hasShutdownUi(ctx: CtxLike | undefined): ctx is CtxLike & { hasUI: true; ui: Required<Pick<UiLike, "confirm">> } {
     return ctx?.hasUI !== false && typeof ctx?.ui?.confirm === "function";
@@ -101,7 +104,7 @@ export default function registerPiMemoryRustExtension(
     return createPiAiLlmProvider({ model: c.model, registry: c.modelRegistry });
   }
 
-  async function runLlm(prompt: string, ctx: unknown, timeoutMs = SHUTDOWN_LLM_TIMEOUT_MS): Promise<{ result?: string; failed: boolean }> {
+  async function runLlm(prompt: string, ctx: unknown, timeoutMs = TURN_LLM_TIMEOUT_MS): Promise<{ result?: string; failed: boolean }> {
     const provider = resolveLlm(ctx);
     if (!provider) return { failed: false };
     try {

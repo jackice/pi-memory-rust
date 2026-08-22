@@ -107,6 +107,8 @@ fn serve(pool: &mut StoragePool, shared: &SharedEmbedder) {
             break;
         }
         if shutdown {
+            // 等待后台模型加载线程结束再退出：进程退出与 ONNX 全局初始化并发会 SIGSEGV
+            shared.join_background_load();
             break;
         }
     }
@@ -244,17 +246,36 @@ fn handle_request(request: &RpcRequest, pool: &mut StoragePool, shared: &SharedE
         methods::MEMORY_COMMAND => {
             match serde_json::from_value::<MemoryCommandParams>(request.params.clone()) {
                 Ok(params) => match pool.get_or_open(&params.project_scope) {
-                    Ok(runtime) => match pi_memory_core::runtime::memory_command(
-                        &runtime.storage,
-                        &params.sub,
-                        &params.target,
-                        &params.project_scope,
-                        &params.session_id,
-                        &shared.status(),
-                    ) {
-                        Ok(text) => RpcResponse::ok(request.id, serde_json::json!(text)),
-                        Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
-                    },
+                    Ok(runtime) => {
+                        let result = pi_memory_core::runtime::memory_command(
+                            &runtime.storage,
+                            &params.sub,
+                            &params.target,
+                            &params.project_scope,
+                            &params.session_id,
+                            &shared.status(),
+                        );
+                        match result {
+                            Ok(text) => {
+                                // clear 只清 DB；重建内存向量索引，避免后续 recall 注入已删除记忆
+                                if params.sub == "clear" {
+                                    match ProjectVectors::new() {
+                                        Ok(vectors) => runtime.vectors = vectors,
+                                        Err(e) => {
+                                            return serde_json::to_value(RpcResponse::err(
+                                                request.id,
+                                                codes::INTERNAL_ERROR,
+                                                format!("重建向量索引失败: {e}"),
+                                            ))
+                                            .expect("序列化不会失败")
+                                        }
+                                    }
+                                }
+                                RpcResponse::ok(request.id, serde_json::json!(text))
+                            }
+                            Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
+                        }
+                    }
                     Err(e) => RpcResponse::err(request.id, codes::INTERNAL_ERROR, e.to_string()),
                 },
                 Err(_) => RpcResponse::err(request.id, codes::INVALID_PARAMS, "memoryCommand 参数无效"),

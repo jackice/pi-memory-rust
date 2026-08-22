@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS facts (
     confidence REAL DEFAULT 0.5,
     source_memory_id TEXT,
     session_id TEXT NOT NULL,
+    project_scope TEXT NOT NULL DEFAULT '',
     timestamp TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS preferences (
@@ -69,6 +70,7 @@ CREATE TABLE IF NOT EXISTS preferences (
     context_snippet TEXT,
     source_memory_id TEXT,
     session_id TEXT NOT NULL,
+    project_scope TEXT NOT NULL DEFAULT '',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS instructions (
@@ -79,6 +81,7 @@ CREATE TABLE IF NOT EXISTS instructions (
     context_snippet TEXT,
     source_memory_id TEXT,
     session_id TEXT NOT NULL,
+    project_scope TEXT NOT NULL DEFAULT '',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS timeline (
@@ -88,6 +91,7 @@ CREATE TABLE IF NOT EXISTS timeline (
     source TEXT,
     source_memory_id TEXT,
     session_id TEXT NOT NULL,
+    project_scope TEXT NOT NULL DEFAULT '',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS memory_embeddings (
@@ -129,6 +133,8 @@ impl TursoStorage {
     /// 初始化 schema（幂等）。
     fn init(&self) -> anyhow::Result<()> {
         self.conn.prepare_execute_batch(SCHEMA_SQL)?;
+        // 旧库迁移：结构化表补 project_scope 列（新库建表已含；幂等）
+        self.ensure_structured_scope_columns()?;
         // Tantivy FTS 索引挂在现有表上（Turso 语法，非 SQLite FTS5 虚拟表）
         self.conn.prepare_execute_batch(
             "CREATE INDEX IF NOT EXISTS fts_working_idx ON working_memory USING fts (content)",
@@ -136,6 +142,23 @@ impl TursoStorage {
         self.conn.prepare_execute_batch(
             "CREATE INDEX IF NOT EXISTS fts_episodes_idx ON episodic_memory USING fts (content)",
         )?;
+        Ok(())
+    }
+
+    /// 旧库迁移：facts/preferences/instructions/timeline 补 project_scope 列（幂等）。
+    fn ensure_structured_scope_columns(&self) -> anyhow::Result<()> {
+        for table in ["facts", "preferences", "instructions", "timeline"] {
+            let sql = format!("PRAGMA table_info({table})");
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.run_collect_rows()?;
+            let has_scope = rows
+                .iter()
+                .any(|row| matches!(row.get(1), Some(Value::Text(name)) if name.as_str() == "project_scope"));
+            if !has_scope {
+                let alter = format!("ALTER TABLE {table} ADD COLUMN project_scope TEXT NOT NULL DEFAULT ''");
+                self.conn.prepare_execute_batch(&alter)?;
+            }
+        }
         Ok(())
     }
 
@@ -290,7 +313,7 @@ impl TursoStorage {
 
     pub fn list_all_facts(&self) -> anyhow::Result<Vec<FactRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT fact_id, subject, predicate, object, confidence, source_memory_id, session_id, timestamp\n             FROM facts",
+            "SELECT fact_id, subject, predicate, object, confidence, source_memory_id, session_id, project_scope, timestamp\n             FROM facts",
         )?;
         collect_rows(&mut stmt, |row| {
             Ok(FactRecord {
@@ -301,14 +324,15 @@ impl TursoStorage {
                 confidence: row_to_f64(row, 4)?,
                 source_memory_id: row_to_opt_string(row, 5)?,
                 session_id: row_to_string(row, 6)?,
-                timestamp: row_to_string(row, 7)?,
+                project_scope: row_to_string(row, 7)?,
+                timestamp: row_to_string(row, 8)?,
             })
         })
     }
 
     pub fn list_all_preferences(&self) -> anyhow::Result<Vec<PreferenceRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, preference, topic, context_snippet, source_memory_id, session_id, created_at\n             FROM preferences",
+            "SELECT id, preference, topic, context_snippet, source_memory_id, session_id, project_scope, created_at\n             FROM preferences",
         )?;
         collect_rows(&mut stmt, |row| {
             Ok(PreferenceRecord {
@@ -318,14 +342,15 @@ impl TursoStorage {
                 context_snippet: row_to_opt_string(row, 3)?,
                 source_memory_id: row_to_opt_string(row, 4)?,
                 session_id: row_to_string(row, 5)?,
-                created_at: row_to_string(row, 6)?,
+                project_scope: row_to_string(row, 6)?,
+                created_at: row_to_string(row, 7)?,
             })
         })
     }
 
     pub fn list_all_instructions(&self) -> anyhow::Result<Vec<InstructionRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, instruction, topic, active, context_snippet, source_memory_id, session_id, created_at\n             FROM instructions",
+            "SELECT id, instruction, topic, active, context_snippet, source_memory_id, session_id, project_scope, created_at\n             FROM instructions",
         )?;
         collect_rows(&mut stmt, |row| {
             Ok(InstructionRecord {
@@ -336,14 +361,15 @@ impl TursoStorage {
                 context_snippet: row_to_opt_string(row, 4)?,
                 source_memory_id: row_to_opt_string(row, 5)?,
                 session_id: row_to_string(row, 6)?,
-                created_at: row_to_string(row, 7)?,
+                project_scope: row_to_string(row, 7)?,
+                created_at: row_to_string(row, 8)?,
             })
         })
     }
 
     pub fn list_all_timeline(&self) -> anyhow::Result<Vec<TimelineEventRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT event_id, date, description, source, source_memory_id, session_id, created_at\n             FROM timeline",
+            "SELECT event_id, date, description, source, source_memory_id, session_id, project_scope, created_at\n             FROM timeline",
         )?;
         collect_rows(&mut stmt, |row| {
             Ok(TimelineEventRecord {
@@ -353,7 +379,8 @@ impl TursoStorage {
                 source: row_to_opt_string(row, 3)?,
                 source_memory_id: row_to_opt_string(row, 4)?,
                 session_id: row_to_string(row, 5)?,
-                created_at: row_to_string(row, 6)?,
+                project_scope: row_to_string(row, 6)?,
+                created_at: row_to_string(row, 7)?,
             })
         })
     }
@@ -504,13 +531,14 @@ impl TursoStorage {
         for record in records {
             let mut stmt = self.conn.prepare(
                 "INSERT INTO facts (fact_id, subject, predicate, object, confidence,
-                                    source_memory_id, session_id, timestamp)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                                    source_memory_id, session_id, project_scope, timestamp)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(fact_id) DO UPDATE SET
                     subject = excluded.subject, predicate = excluded.predicate,
                     object = excluded.object, confidence = excluded.confidence,
                     source_memory_id = excluded.source_memory_id,
-                    session_id = excluded.session_id, timestamp = excluded.timestamp",
+                    session_id = excluded.session_id, project_scope = excluded.project_scope,
+                    timestamp = excluded.timestamp",
             )?;
             bind_text(&mut stmt, 1, &record.fact_id)?;
             bind_text(&mut stmt, 2, &record.subject)?;
@@ -519,7 +547,8 @@ impl TursoStorage {
             bind_num(&mut stmt, 5, record.confidence)?;
             bind_opt_text(&mut stmt, 6, record.source_memory_id.as_deref())?;
             bind_text(&mut stmt, 7, &record.session_id)?;
-            bind_text(&mut stmt, 8, &record.timestamp)?;
+            bind_text(&mut stmt, 8, &record.project_scope)?;
+            bind_text(&mut stmt, 9, &record.timestamp)?;
             stmt.run_ignore_rows()?;
         }
         Ok(())
@@ -529,13 +558,14 @@ impl TursoStorage {
         for record in records {
             let mut stmt = self.conn.prepare(
                 "INSERT INTO preferences (id, preference, topic, context_snippet,
-                                         source_memory_id, session_id, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                                         source_memory_id, session_id, project_scope, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(id) DO UPDATE SET
                     preference = excluded.preference, topic = excluded.topic,
                     context_snippet = excluded.context_snippet,
                     source_memory_id = excluded.source_memory_id,
-                    session_id = excluded.session_id, created_at = excluded.created_at",
+                    session_id = excluded.session_id, project_scope = excluded.project_scope,
+                    created_at = excluded.created_at",
             )?;
             bind_text(&mut stmt, 1, &record.id)?;
             bind_text(&mut stmt, 2, &record.preference)?;
@@ -543,7 +573,8 @@ impl TursoStorage {
             bind_opt_text(&mut stmt, 4, record.context_snippet.as_deref())?;
             bind_opt_text(&mut stmt, 5, record.source_memory_id.as_deref())?;
             bind_text(&mut stmt, 6, &record.session_id)?;
-            bind_text(&mut stmt, 7, &record.created_at)?;
+            bind_text(&mut stmt, 7, &record.project_scope)?;
+            bind_text(&mut stmt, 8, &record.created_at)?;
             stmt.run_ignore_rows()?;
         }
         Ok(())
@@ -553,13 +584,14 @@ impl TursoStorage {
         for record in records {
             let mut stmt = self.conn.prepare(
                 "INSERT INTO instructions (id, instruction, topic, active, context_snippet,
-                                          source_memory_id, session_id, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                                          source_memory_id, session_id, project_scope, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(id) DO UPDATE SET
                     instruction = excluded.instruction, topic = excluded.topic,
                     active = excluded.active, context_snippet = excluded.context_snippet,
                     source_memory_id = excluded.source_memory_id,
-                    session_id = excluded.session_id, created_at = excluded.created_at",
+                    session_id = excluded.session_id, project_scope = excluded.project_scope,
+                    created_at = excluded.created_at",
             )?;
             bind_text(&mut stmt, 1, &record.id)?;
             bind_text(&mut stmt, 2, &record.instruction)?;
@@ -568,7 +600,8 @@ impl TursoStorage {
             bind_opt_text(&mut stmt, 5, record.context_snippet.as_deref())?;
             bind_opt_text(&mut stmt, 6, record.source_memory_id.as_deref())?;
             bind_text(&mut stmt, 7, &record.session_id)?;
-            bind_text(&mut stmt, 8, &record.created_at)?;
+            bind_text(&mut stmt, 8, &record.project_scope)?;
+            bind_text(&mut stmt, 9, &record.created_at)?;
             stmt.run_ignore_rows()?;
         }
         Ok(())
@@ -578,12 +611,13 @@ impl TursoStorage {
         for record in records {
             let mut stmt = self.conn.prepare(
                 "INSERT INTO timeline (event_id, date, description, source,
-                                      source_memory_id, session_id, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                                      source_memory_id, session_id, project_scope, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(event_id) DO UPDATE SET
                     date = excluded.date, description = excluded.description,
                     source = excluded.source, source_memory_id = excluded.source_memory_id,
-                    session_id = excluded.session_id, created_at = excluded.created_at",
+                    session_id = excluded.session_id, project_scope = excluded.project_scope,
+                    created_at = excluded.created_at",
             )?;
             bind_text(&mut stmt, 1, &record.event_id)?;
             bind_text(&mut stmt, 2, &record.date)?;
@@ -591,7 +625,8 @@ impl TursoStorage {
             bind_opt_text(&mut stmt, 4, record.source.as_deref())?;
             bind_opt_text(&mut stmt, 5, record.source_memory_id.as_deref())?;
             bind_text(&mut stmt, 6, &record.session_id)?;
-            bind_text(&mut stmt, 7, &record.created_at)?;
+            bind_text(&mut stmt, 7, &record.project_scope)?;
+            bind_text(&mut stmt, 8, &record.created_at)?;
             stmt.run_ignore_rows()?;
         }
         Ok(())
@@ -616,12 +651,15 @@ impl TursoStorage {
     }
 
     /// 结构化表 LIKE 搜索（queryStructuredCandidates 对应）。
-    pub fn search_facts_like(&self, query: &str) -> anyhow::Result<Vec<FactRecord>> {
+    /// project_scope 过滤：空串/旧库未标记数据兼容可见（项目隔离对新写入数据生效）。
+    pub fn search_facts_like(&self, query: &str, project_scope: &str) -> anyhow::Result<Vec<FactRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT fact_id, subject, predicate, object, confidence, source_memory_id, session_id, timestamp
-             FROM facts WHERE subject LIKE ?1 OR predicate LIKE ?1 OR object LIKE ?1",
+            "SELECT fact_id, subject, predicate, object, confidence, source_memory_id, session_id, project_scope, timestamp
+             FROM facts WHERE (subject LIKE ?1 OR predicate LIKE ?1 OR object LIKE ?1)
+               AND (project_scope = ?2 OR project_scope = '' OR project_scope IS NULL)",
         )?;
         bind_text(&mut stmt, 1, &format!("%{query}%"))?;
+        bind_text(&mut stmt, 2, project_scope)?;
         collect_rows(&mut stmt, |row| {
             Ok(FactRecord {
                 fact_id: row_to_string(row, 0)?,
@@ -631,17 +669,20 @@ impl TursoStorage {
                 confidence: row_to_f64(row, 4)?,
                 source_memory_id: row_to_opt_string(row, 5)?,
                 session_id: row_to_string(row, 6)?,
-                timestamp: row_to_string(row, 7)?,
+                project_scope: row_to_string(row, 7)?,
+                timestamp: row_to_string(row, 8)?,
             })
         })
     }
 
-    pub fn search_instructions_like(&self, query: &str) -> anyhow::Result<Vec<InstructionRecord>> {
+    pub fn search_instructions_like(&self, query: &str, project_scope: &str) -> anyhow::Result<Vec<InstructionRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, instruction, topic, active, context_snippet, source_memory_id, session_id, created_at
-             FROM instructions WHERE instruction LIKE ?1",
+            "SELECT id, instruction, topic, active, context_snippet, source_memory_id, session_id, project_scope, created_at
+             FROM instructions WHERE instruction LIKE ?1
+               AND (project_scope = ?2 OR project_scope = '' OR project_scope IS NULL)",
         )?;
         bind_text(&mut stmt, 1, &format!("%{query}%"))?;
+        bind_text(&mut stmt, 2, project_scope)?;
         collect_rows(&mut stmt, |row| {
             Ok(InstructionRecord {
                 id: row_to_string(row, 0)?,
@@ -651,17 +692,20 @@ impl TursoStorage {
                 context_snippet: row_to_opt_string(row, 4)?,
                 source_memory_id: row_to_opt_string(row, 5)?,
                 session_id: row_to_string(row, 6)?,
-                created_at: row_to_string(row, 7)?,
+                project_scope: row_to_string(row, 7)?,
+                created_at: row_to_string(row, 8)?,
             })
         })
     }
 
-    pub fn search_preferences_like(&self, query: &str) -> anyhow::Result<Vec<PreferenceRecord>> {
+    pub fn search_preferences_like(&self, query: &str, project_scope: &str) -> anyhow::Result<Vec<PreferenceRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, preference, topic, context_snippet, source_memory_id, session_id, created_at
-             FROM preferences WHERE preference LIKE ?1",
+            "SELECT id, preference, topic, context_snippet, source_memory_id, session_id, project_scope, created_at
+             FROM preferences WHERE preference LIKE ?1
+               AND (project_scope = ?2 OR project_scope = '' OR project_scope IS NULL)",
         )?;
         bind_text(&mut stmt, 1, &format!("%{query}%"))?;
+        bind_text(&mut stmt, 2, project_scope)?;
         collect_rows(&mut stmt, |row| {
             Ok(PreferenceRecord {
                 id: row_to_string(row, 0)?,
@@ -670,17 +714,20 @@ impl TursoStorage {
                 context_snippet: row_to_opt_string(row, 3)?,
                 source_memory_id: row_to_opt_string(row, 4)?,
                 session_id: row_to_string(row, 5)?,
-                created_at: row_to_string(row, 6)?,
+                project_scope: row_to_string(row, 6)?,
+                created_at: row_to_string(row, 7)?,
             })
         })
     }
 
-    pub fn search_timeline_like(&self, query: &str) -> anyhow::Result<Vec<TimelineEventRecord>> {
+    pub fn search_timeline_like(&self, query: &str, project_scope: &str) -> anyhow::Result<Vec<TimelineEventRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT event_id, date, description, source, source_memory_id, session_id, created_at
-             FROM timeline WHERE date LIKE ?1 OR description LIKE ?1",
+            "SELECT event_id, date, description, source, source_memory_id, session_id, project_scope, created_at
+             FROM timeline WHERE (date LIKE ?1 OR description LIKE ?1)
+               AND (project_scope = ?2 OR project_scope = '' OR project_scope IS NULL)",
         )?;
         bind_text(&mut stmt, 1, &format!("%{query}%"))?;
+        bind_text(&mut stmt, 2, project_scope)?;
         collect_rows(&mut stmt, |row| {
             Ok(TimelineEventRecord {
                 event_id: row_to_string(row, 0)?,
@@ -689,7 +736,8 @@ impl TursoStorage {
                 source: row_to_opt_string(row, 3)?,
                 source_memory_id: row_to_opt_string(row, 4)?,
                 session_id: row_to_string(row, 5)?,
-                created_at: row_to_string(row, 6)?,
+                project_scope: row_to_string(row, 6)?,
+                created_at: row_to_string(row, 7)?,
             })
         })
     }
