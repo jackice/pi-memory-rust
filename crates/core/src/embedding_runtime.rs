@@ -377,4 +377,9 @@ impl ProjectVectors {
         }
         Ok(candidates)
     }
+
+    /// Number of vectors currently in the index (tests/diagnostics).
+    pub fn index_len(&self) -> usize {
+        self.index.len()
+    }
 }
