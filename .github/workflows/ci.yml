@@ -44,6 +44,7 @@ jobs:
       - name: Build release binary
         run: |
           cargo build --release -p pi-memory-core --bin pi-memory-server
+          mkdir -p ts/bin
           cp target/release/pi-memory-server ts/bin/
 
       - name: TypeScript extension tests
