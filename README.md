@@ -86,18 +86,18 @@ Session exit defaults to *not* summarizing; on quit, Pi may ask whether to conso
 
 Run: `cargo run --release -p pi-memory-core --bin pi-memory-bench` (10k memories, 100 queries; local-only, zero LLM API cost).
 
-### Results (10,000 memories, macOS arm64)
+### Results (10,000 memories, macOS arm64, v0.1.14)
 
 | Metric | Value |
 |---|---|
-| **Recall injection (avg)** | **19.2 ms** |
-| Recall P50 | 19.2 ms |
-| Recall P95 | 20.5 ms |
-| Recall max | 22.0 ms |
-| Single-turn retain (real path) | 6.8 ms |
-| Bulk fill throughput | 4.8 ms/item (48s for 10k) |
+| **Recall injection (avg)** | **5.12 ms** |
+| Recall P50 | 5.01 ms |
+| Recall P95 | 5.96 ms |
+| Recall max | 7.80 ms |
+| Single-turn retain (real path) | 7.13 ms |
+| Bulk fill throughput | 4.73 ms/item (47.3s for 10k) |
 | Database file size | 82.6 MB |
 
-Acceptance target: recall injection ≤ 300ms at 10k memories — **achieved with ~15× headroom**.
+Acceptance target: recall injection ≤ 300ms at 10k memories — **achieved with ~58× headroom**.
 
-Bulk-fill breakdown: embedding 47.4s (ONNX batch inference) | DB write 0.2s | vector index 0.3s | FTS rebuild 0.0s. The Tantivy FTS index is dropped during bulk fill and rebuilt once at the end (avoids per-row commit overhead); the real single-turn retain path runs with the index active at 6.8ms/item.
+Bulk-fill breakdown: embedding 46.6s (ONNX batch inference) | DB write 0.2s | vector index 0.3s | FTS rebuild 0.0s. The Tantivy FTS index is dropped during bulk fill and rebuilt once at the end (avoids per-row commit overhead); the real single-turn retain path runs with the index active at 7.13ms/item.
