@@ -181,6 +181,11 @@ impl TursoStorage {
         self.conn.prepare_execute_batch(
             "CREATE INDEX IF NOT EXISTS fts_episodes_idx ON episodic_memory USING fts (content)",
         )?;
+        // 结构化表 scope 索引：LIKE %q% 无法走索引，但先按 project_scope 裁剪可避免跨项目全表扫描
+        for table in ["facts", "preferences", "instructions", "timeline"] {
+            let sql = format!("CREATE INDEX IF NOT EXISTS idx_{table}_scope ON {table}(project_scope)");
+            self.conn.prepare_execute_batch(&sql)?;
+        }
         Ok(())
     }
 
