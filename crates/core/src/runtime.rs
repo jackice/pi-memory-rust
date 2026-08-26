@@ -75,9 +75,13 @@ pub fn build_recall_injection(
     })?;
 
     // Render: results.map(r => `- [${kind}] ${content}`).join("\n")
+    // working/episodic 存的是完整对话原文，注入前截断避免撑爆上下文；structured 内容短且语义完整，不截断
     let rendered = results
         .iter()
-        .map(|candidate| format!("- [{}] {}", candidate.memory_kind.as_str(), candidate.content))
+        .map(|candidate| {
+            let content = truncate_recall_content(&candidate.content, candidate.memory_kind);
+            format!("- [{}] {}", candidate.memory_kind.as_str(), content)
+        })
         .collect::<Vec<_>>()
         .join("\n");
     Ok(rendered)
@@ -359,6 +363,21 @@ pub fn memory_command(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/// 注入渲染时单条候选 content 的最大字符数（按 Unicode 字符计）。
+const RECALL_TRUNCATE_CHARS: usize = 300;
+
+/// 截断 recall 注入内容：working/episodic 超长时保留前 300 字符并追加省略号，
+/// 其余类型（facts/preferences/instructions/timeline）内容短且语义完整，原样返回。
+fn truncate_recall_content(content: &str, kind: MemoryKind) -> String {
+    match kind {
+        MemoryKind::Working | MemoryKind::Episodic if content.chars().count() > RECALL_TRUNCATE_CHARS => {
+            let truncated: String = content.chars().take(RECALL_TRUNCATE_CHARS).collect();
+            format!("{truncated}…")
+        }
+        _ => content.to_string(),
+    }
+}
+
 fn to_safe_fts_query(prompt: &str) -> String {
     // Matches toSafeFtsQuery: split on whitespace, quote tokens, join with OR
     let tokens: Vec<String> = prompt
@@ -472,3 +491,61 @@ pub fn now_iso() -> String {
 
 #[allow(dead_code)]
 pub(crate) const _EPOCH: &str = EPOCH_ISO;
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_recall_content;
+    use crate::models::MemoryKind;
+
+    fn long_content(units: usize) -> String {
+        "这是一段模拟完整对话原文的长内容，包含代码与 markdown。".repeat(units)
+    }
+
+    #[test]
+    fn truncates_long_working_content_to_300_chars_with_ellipsis() {
+        let content = long_content(30); // ~390 字符 > 300
+        let truncated = truncate_recall_content(&content, MemoryKind::Working);
+        assert_eq!(truncated.chars().count(), 300 + 1, "300 字符 + 省略号");
+        assert!(truncated.ends_with('…'));
+        let prefix: String = content.chars().take(10).collect();
+        assert!(truncated.starts_with(&prefix));
+    }
+
+    #[test]
+    fn truncates_long_episodic_content() {
+        let content = long_content(30);
+        let truncated = truncate_recall_content(&content, MemoryKind::Episodic);
+        assert_eq!(truncated.chars().count(), 301);
+        assert!(truncated.ends_with('…'));
+    }
+
+    #[test]
+    fn keeps_short_content_unchanged() {
+        let content = "短内容".to_string();
+        assert_eq!(truncate_recall_content(&content, MemoryKind::Working), content);
+        assert_eq!(truncate_recall_content(&content, MemoryKind::Episodic), content);
+    }
+
+    #[test]
+    fn structured_kinds_are_never_truncated() {
+        let content = long_content(50); // 远超过 300 字符
+        for kind in [
+            MemoryKind::Fact,
+            MemoryKind::Preference,
+            MemoryKind::Instruction,
+            MemoryKind::Timeline,
+        ] {
+            assert_eq!(truncate_recall_content(&content, kind), content);
+        }
+    }
+
+    #[test]
+    fn truncation_respects_unicode_char_boundaries() {
+        // 中文字符是多字节 UTF-8，截断不得产生半个字符
+        let content = long_content(30);
+        let truncated = truncate_recall_content(&content, MemoryKind::Working);
+        assert!(truncated.is_char_boundary(truncated.len()));
+        assert!(String::from_utf8(truncated.into_bytes()).is_ok());
+    }
+}
+
