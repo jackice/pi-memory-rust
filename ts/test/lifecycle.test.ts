@@ -45,6 +45,10 @@ function mockClientMethods() {
       return "ok";
     }
     if (method === "buildRecallInjection") {
+      // 模拟 Rust 侧 RecallParams 字段校验：prompt 必须是字符串
+      if (typeof (params as { prompt?: unknown } | undefined)?.prompt !== "string") {
+        throw new Error("invalid buildRecallInjection params");
+      }
       return "injection";
     }
     if (method === "retainTurnMemories") {
@@ -204,5 +208,34 @@ test("turn_end LLM extraction is not killed by the 1s timeout (slow model still 
       process.env.PI_MEMORY_LLM = prevEnv;
     }
   }
+});
+
+test("before_agent_start skips recall for custom-message runs without a prompt", async () => {
+  mockClientMethods();
+  const pi = new FakePi();
+  registerPiMemoryRustExtension(pi as any, {});
+  const { ctx } = makeCtx(false);
+
+  const handler = pi.handlers.get("before_agent_start")?.[0];
+  expect(handler).toBeDefined();
+  const result = await handler!({ messageType: "custom", message: { content: "welcome" } }, ctx);
+
+  expect(result).toBeUndefined();
+  expect(callLog.map(([method]) => method)).toEqual([]);
+});
+
+test("before_agent_start recalls with the user prompt", async () => {
+  mockClientMethods();
+  const pi = new FakePi();
+  registerPiMemoryRustExtension(pi as any, {});
+  const { ctx } = makeCtx(false);
+
+  const handler = pi.handlers.get("before_agent_start")?.[0];
+  expect(handler).toBeDefined();
+  const result = (await handler!({ messageType: "user", prompt: "hello memory" }, ctx)) as any;
+
+  expect(callLog.map(([method]) => method)).toEqual(["buildRecallInjection"]);
+  expect((callLog[0][1] as { prompt?: unknown }).prompt).toBe("hello memory");
+  expect(result.message.content).toBe("injection");
 });
 

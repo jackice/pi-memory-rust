@@ -352,6 +352,10 @@ fn handle_request(request: &RpcRequest, pool: &mut StoragePool, shared: &SharedE
         }
         methods::BUILD_RECALL_INJECTION => {
             match serde_json::from_value::<RecallParams>(request.params.clone()) {
+                // 空 prompt 不进入检索：custom 消息触发的运行没有用户查询
+                Ok(params) if params.prompt.trim().is_empty() => {
+                    RpcResponse::ok(request.id, serde_json::json!(""))
+                }
                 Ok(params) => match pool.get_or_open(&params.project_scope) {
                     Ok(runtime) => match pi_memory_core::runtime::build_recall_injection(
                         &runtime.storage,
@@ -512,6 +516,7 @@ fn handle_request(request: &RpcRequest, pool: &mut StoragePool, shared: &SharedE
 
 #[derive(serde::Deserialize)]
 struct RecallParams {
+    #[serde(default)]
     prompt: String,
     #[serde(rename = "projectScope")]
     project_scope: String,
@@ -672,5 +677,27 @@ mod tests {
             let frame = read_frame(&mut cursor).unwrap().unwrap();
             assert_eq!(frame, format!(r#"{{"id":{i}}}"#));
         }
+    }
+
+    #[test]
+    fn recall_params_default_missing_prompt() {
+        // custom 消息触发的运行没有 prompt，缺字段不能退化为 INVALID_PARAMS
+        let params: super::RecallParams = serde_json::from_value(serde_json::json!({
+            "projectScope": "/tmp/p",
+            "sessionId": "s1",
+        }))
+        .expect("missing prompt must default");
+        assert!(params.prompt.is_empty());
+    }
+
+    #[test]
+    fn recall_params_keep_prompt_when_present() {
+        let params: super::RecallParams = serde_json::from_value(serde_json::json!({
+            "prompt": "hello",
+            "projectScope": "/tmp/p",
+            "sessionId": "s1",
+        }))
+        .expect("valid params must deserialize");
+        assert_eq!(params.prompt, "hello");
     }
 }

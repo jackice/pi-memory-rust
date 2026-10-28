@@ -147,9 +147,12 @@ export default function registerPiMemoryRustExtension(
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
+    // custom 消息触发（pi.sendMessage + triggerTurn）的运行没有用户 prompt，跳过召回
+    const prompt = (event as { prompt?: unknown }).prompt;
+    if (typeof prompt !== "string" || prompt.trim().length === 0) return;
     try {
       const injection = await client.call<string>("buildRecallInjection", {
-        prompt: event.prompt,
+        prompt,
         sessionId: resolveSessionId(ctx),
         projectScope: resolveProjectScope(ctx),
       });
