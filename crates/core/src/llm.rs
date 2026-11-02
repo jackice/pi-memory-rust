@@ -31,7 +31,7 @@ pub struct LlmExtractionResult {
 }
 
 /// Parse the structured JSON returned by the LLM; returns a default empty result on parse failure.
-/// Note: id/sessionId fields absent from the LLM output are filled in by the caller (the LLM only provides content fields).
+/// ID、session 和 source 字段由服务端根据内容与当前 turn 统一生成；LLM 返回的 ID 不可信且会被忽略。
 pub fn parse_llm_extraction(payload: &str) -> LlmExtractionResult {
     let parsed: serde_json::Value = match serde_json::from_str(payload) {
         Ok(v) => v,

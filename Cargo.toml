@@ -28,3 +28,5 @@ thiserror = "2"
 ndarray = "0.17"
 ureq = { version = "3", features = ["rustls"] }
 base64 = "0.22"
+sha2 = "0.10"
+unicode_categories = "0.1.1"

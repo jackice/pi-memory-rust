@@ -20,10 +20,10 @@ fn retain_parses_llm_result_and_upserts_structured() {
     // 模型未就绪时 EmbeddingRuntime::new 不下载（测试环境无模型，走降级）
 
     let llm_json = r#"{
-        "facts": [{"subject": "项目", "predicate": "采用", "object": "Rust"}],
-        "preferences": [{"preference": "使用中文", "topic": "language"}],
-        "instructions": [{"instruction": "提交前测试", "topic": "workflow"}],
-        "timeline": [{"date": "2026-08-21", "description": "M3 完成"}]
+        "facts": [{"subject": "项目", "predicate": "采用", "object": "Rust", "timestamp": "forged"}],
+        "preferences": [{"preference": "使用中文", "topic": "language", "createdAt": "forged"}],
+        "instructions": [{"instruction": "提交前测试", "topic": "workflow", "createdAt": "forged"}],
+        "timeline": [{"date": "2026-08-21", "description": "M3 完成", "createdAt": "forged", "source": "forged"}]
     }"#;
     retain_turn_memories(
         &storage, 1, "会话文本", "s1", "/tmp/llm", &shared, &mut vectors, Some(llm_json),
@@ -34,13 +34,161 @@ fn retain_parses_llm_result_and_upserts_structured() {
     assert_eq!(storage.count_by_session("preferences", "s1").unwrap(), 1);
     assert_eq!(storage.count_by_session("instructions", "s1").unwrap(), 1);
     assert_eq!(storage.count_by_session("timeline", "s1").unwrap(), 1);
+    assert_eq!(storage.list_all_timeline().unwrap()[0].source.as_deref(), Some("llm"));
+    assert_eq!(storage.list_all_timeline().unwrap()[0].created_at, "1970-01-01T00:00:00.000Z");
 
     let facts = storage.search_facts_like("Rust", "/tmp/llm").unwrap();
     assert_eq!(facts[0].subject, "项目");
     assert_eq!(facts[0].predicate, "采用");
+    assert_eq!(facts[0].timestamp, "1970-01-01T00:00:00.000Z");
+    assert_eq!(
+        storage.search_preferences_like("使用中文", "/tmp/llm").unwrap()[0].created_at,
+        "1970-01-01T00:00:00.000Z"
+    );
+    assert_eq!(
+        storage.search_instructions_like("提交前测试", "/tmp/llm").unwrap()[0].created_at,
+        "1970-01-01T00:00:00.000Z"
+    );
     // 补全字段
     assert_eq!(facts[0].session_id, "s1");
     assert!(facts[0].source_memory_id.is_some());
+}
+
+#[test]
+fn retain_persists_multiple_structured_memories_without_id_collisions() {
+    let storage = TursoStorage::open(&temp_db("llm-multiple-structured.db")).expect("打开失败");
+    let shared = SharedEmbedder::new();
+    let mut vectors = ProjectVectors::new().unwrap();
+    let llm_json = r#"{
+        "facts": [
+            {"factId": "forged", "subject": "项目", "predicate": "采用", "object": "Rust"},
+            {"factId": "forged", "subject": "项目", "predicate": "采用", "object": "Rust"},
+            {"factId": "forged", "subject": " 项目 ", "predicate": "采用", "object": " Rust "},
+            {"factId": "forged", "subject": "部署", "predicate": "运行于", "object": "Linux"},
+            {"subject": "测试", "predicate": "覆盖", "object": "集成"}
+        ],
+        "preferences": [
+            {"id": "forged", "preference": "使用中文", "topic": "language"},
+            {"id": "forged", "preference": "先写测试", "topic": "workflow"},
+            {"id": "forged", "preference": "保留兼容性", "topic": "design"}
+        ],
+        "instructions": [
+            {"id": "forged", "instruction": "提交前测试", "topic": "workflow"},
+            {"id": "forged", "instruction": "保留兼容性", "topic": "design"},
+            {"id": "forged", "instruction": "先确认写入范围", "topic": "safety"}
+        ],
+        "timeline": [
+            {"eventId": "forged", "date": "2026-08-21", "description": "M3 完成"},
+            {"eventId": "forged", "date": "2026-08-22", "description": "发布候选版"},
+            {"eventId": "forged", "date": "2026-08-23", "description": "完成兼容性验证"}
+        ]
+    }"#;
+
+    retain_turn_memories(
+        &storage, 1, "多条结构化记忆", "s1", "/tmp/llm-multiple", &shared, &mut vectors,
+        Some(llm_json),
+    ).expect("retain 失败");
+
+    retain_turn_memories(
+        &storage, 1, "多条结构化记忆", "s1", "/tmp/llm-multiple", &shared, &mut vectors,
+        Some(llm_json),
+    )
+    .expect("重复 retain 失败");
+
+    assert_eq!(storage.count_by_session("facts", "s1").unwrap(), 3);
+    assert_eq!(storage.count_by_session("preferences", "s1").unwrap(), 3);
+    assert_eq!(storage.count_by_session("instructions", "s1").unwrap(), 3);
+    assert_eq!(storage.count_by_session("timeline", "s1").unwrap(), 3);
+
+    let facts = storage.search_facts_like("", "/tmp/llm-multiple").unwrap();
+    let preferences = storage.search_preferences_like("", "/tmp/llm-multiple").unwrap();
+    let instructions = storage.search_instructions_like("", "/tmp/llm-multiple").unwrap();
+    let timeline = storage.search_timeline_like("", "/tmp/llm-multiple").unwrap();
+    assert_eq!(facts.len(), 3);
+    assert!(facts.iter().all(|item| item.fact_id != "forged"));
+    assert!(preferences.iter().all(|item| item.id != "forged"));
+    assert!(instructions.iter().all(|item| item.id != "forged"));
+    assert!(timeline.iter().all(|item| item.event_id != "forged"));
+}
+
+#[test]
+fn retain_filters_empty_llm_items_and_falls_back_to_rules() {
+    let storage = TursoStorage::open(&temp_db("llm-empty-structured.db")).expect("打开失败");
+    let shared = SharedEmbedder::new();
+    let mut vectors = ProjectVectors::new().unwrap();
+
+    retain_turn_memories(
+        &storage,
+        1,
+        "事实: 首版正式采用本地 SQLite",
+        "s1",
+        "/tmp/llm-empty",
+        &shared,
+        &mut vectors,
+        Some(r#"{"facts":[{"subject":" ","predicate":"采用","object":"SQLite"}]}"#),
+    )
+    .expect("retain 失败");
+
+    assert_eq!(storage.count_by_session("facts", "s1").unwrap(), 1);
+    assert_eq!(
+        storage.search_facts_like("SQLite", "/tmp/llm-empty").unwrap()[0].subject,
+        "首版"
+    );
+}
+
+#[test]
+fn retain_limits_structured_items_to_32_and_trims_stored_fields() {
+    let storage = TursoStorage::open(&temp_db("llm-structured-limit.db")).expect("打开失败");
+    let shared = SharedEmbedder::new();
+    let mut vectors = ProjectVectors::new().unwrap();
+    let mut facts = (0..34)
+        .map(|index| serde_json::json!({
+            "subject": format!(" subject {index} "),
+            "predicate": " uses ",
+            "object": format!(" object {index} ")
+        }))
+        .collect::<Vec<_>>();
+    facts.insert(0, serde_json::json!({"subject":" ","predicate":"uses","object":"empty"}));
+    facts.insert(1, serde_json::json!({"subject":"missing object","predicate":"uses","object":" "}));
+    let payload = serde_json::json!({"facts": facts}).to_string();
+
+    retain_turn_memories(
+        &storage, 1, "many facts", "s1", "/tmp/llm-limit", &shared, &mut vectors,
+        Some(&payload),
+    )
+    .expect("retain 失败");
+
+    assert_eq!(storage.count_by_session("facts", "s1").unwrap(), 32);
+    let hits = storage.search_facts_like("object 0", "/tmp/llm-limit").unwrap();
+    assert_eq!(hits[0].subject, "subject 0");
+    assert_eq!(hits[0].predicate, "uses");
+    assert_eq!(hits[0].object, "object 0");
+}
+
+#[test]
+fn retain_deduplicates_before_applying_the_per_kind_limit() {
+    let storage = TursoStorage::open(&temp_db("llm-dedup-before-limit.db")).expect("打开失败");
+    let shared = SharedEmbedder::new();
+    let mut vectors = ProjectVectors::new().unwrap();
+    let mut facts = vec![serde_json::json!({
+        "subject": "same", "predicate": "uses", "object": "duplicate"
+    }); 40];
+    facts.extend((0..31).map(|index| serde_json::json!({
+        "subject": "unique", "predicate": "uses", "object": format!("item-{index}")
+    })));
+    let payload = serde_json::json!({"facts": facts}).to_string();
+
+    retain_turn_memories(
+        &storage, 1, "duplicate items before distinct items", "s1", "/tmp/llm-dedup-limit", &shared, &mut vectors,
+        Some(&payload),
+    ).expect("retain 失败");
+
+    assert_eq!(storage.count_by_session("facts", "s1").unwrap(), 32);
+    let retained = storage.search_facts_like("", "/tmp/llm-dedup-limit").unwrap();
+    assert!(
+        retained.iter().any(|fact| fact.object == "item-30"),
+        "前面的重复项不能挤占后续唯一内容的名额"
+    );
 }
 
 #[test]
@@ -51,7 +199,14 @@ fn retain_invalid_llm_result_falls_back_to_rules() {
 
     // 无效 JSON → 降级规则路径（文本含「事实:」前缀）
     retain_turn_memories(
-        &storage, 1, "事实: 首版正式采用本地 SQLite", "s1", "/tmp/llm", &shared, &mut vectors, Some("not json at all"),
+        &storage,
+        1,
+        "事实: 首版正式采用本地 SQLite\n时间线: 2026-08-19 完成 Task 2 的 SQLite schema",
+        "s1",
+        "/tmp/llm",
+        &shared,
+        &mut vectors,
+        Some("not json at all"),
     )
     .expect("retain 失败");
 
@@ -59,6 +214,11 @@ fn retain_invalid_llm_result_falls_back_to_rules() {
     let facts = storage.search_facts_like("SQLite", "/tmp/llm").unwrap();
     assert_eq!(facts[0].subject, "首版");
     assert_eq!(facts[0].predicate, "正式采用");
+    assert_eq!(
+        facts[0].fact_id,
+        pi_memory_core::ids::stable_id("s1:turn:1", "fact", &["首版", "正式采用", "本地 SQLite"])
+    );
+    assert_eq!(storage.list_all_timeline().unwrap()[0].source.as_deref(), Some("retained-turn"));
 }
 
 #[test]

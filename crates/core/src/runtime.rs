@@ -136,57 +136,8 @@ pub fn retain_turn_memories(
             structured = Some(parsed);
         }
     }
-    let mut extracted = match structured {
-        Some(parsed) => {
-            // Fill in id/session/source fields missing from the LLM result
-            let mut parsed = parsed;
-            for fact in &mut parsed.facts {
-                if fact.fact_id.is_empty() {
-                    fact.fact_id = format!("{memory_id}:fact:llm");
-                }
-                fact.source_memory_id = Some(memory_id.clone());
-                fact.session_id = session_id.to_string();
-                fact.project_scope = project_scope.to_string();
-                if fact.timestamp.is_empty() {
-                    fact.timestamp = crate::core::extraction::EPOCH_ISO.to_string();
-                }
-            }
-            for preference in &mut parsed.preferences {
-                if preference.id.is_empty() {
-                    preference.id = format!("{memory_id}:preference:llm");
-                }
-                preference.source_memory_id = Some(memory_id.clone());
-                preference.session_id = session_id.to_string();
-                preference.project_scope = project_scope.to_string();
-                if preference.created_at.is_empty() {
-                    preference.created_at = crate::core::extraction::EPOCH_ISO.to_string();
-                }
-            }
-            for instruction in &mut parsed.instructions {
-                if instruction.id.is_empty() {
-                    instruction.id = format!("{memory_id}:instruction:llm");
-                }
-                instruction.source_memory_id = Some(memory_id.clone());
-                instruction.session_id = session_id.to_string();
-                instruction.project_scope = project_scope.to_string();
-                if instruction.created_at.is_empty() {
-                    instruction.created_at = crate::core::extraction::EPOCH_ISO.to_string();
-                }
-            }
-            for event in &mut parsed.timeline {
-                if event.event_id.is_empty() {
-                    event.event_id = format!("{memory_id}:timeline:llm");
-                }
-                event.source = Some("llm".into());
-                event.source_memory_id = Some(memory_id.clone());
-                event.session_id = session_id.to_string();
-                event.project_scope = project_scope.to_string();
-                if event.created_at.is_empty() {
-                    event.created_at = crate::core::extraction::EPOCH_ISO.to_string();
-                }
-            }
-            parsed
-        }
+    let (mut extracted, timeline_source) = match structured {
+        Some(parsed) => (parsed, "llm"),
         None => {
             let rule = extract_with_heuristics(&ExtractStructuredMemoriesOptions {
                 retained_turn_id: memory_id.clone(),
@@ -194,14 +145,38 @@ pub fn retain_turn_memories(
                 project_scope: project_scope.to_string(),
                 text: text.to_string(),
             });
-            crate::llm::LlmExtractionResult {
-                facts: rule.facts,
-                preferences: rule.preferences,
-                instructions: rule.instructions,
-                timeline: rule.timeline,
-            }
+            (
+                crate::llm::LlmExtractionResult {
+                    facts: rule.facts,
+                    preferences: rule.preferences,
+                    instructions: rule.instructions,
+                    timeline: rule.timeline,
+                },
+                "retained-turn",
+            )
         }
     };
+    assign_structured_ids(&mut extracted, &memory_id, session_id, project_scope, timeline_source);
+    if llm_result.is_some()
+        && extracted.facts.is_empty()
+        && extracted.preferences.is_empty()
+        && extracted.instructions.is_empty()
+        && extracted.timeline.is_empty()
+    {
+        let rule = extract_with_heuristics(&ExtractStructuredMemoriesOptions {
+            retained_turn_id: memory_id.clone(),
+            session_id: session_id.to_string(),
+            project_scope: project_scope.to_string(),
+            text: text.to_string(),
+        });
+        extracted = crate::llm::LlmExtractionResult {
+            facts: rule.facts,
+            preferences: rule.preferences,
+            instructions: rule.instructions,
+            timeline: rule.timeline,
+        };
+        assign_structured_ids(&mut extracted, &memory_id, session_id, project_scope, "retained-turn");
+    }
     storage.insert_facts(&extracted.facts)?;
     storage.insert_preferences(&extracted.preferences)?;
     storage.insert_instructions(&extracted.instructions)?;
@@ -218,6 +193,142 @@ pub fn retain_turn_memories(
     // Persist the embedding (failure does not block the retain main flow)
     let _ = vectors.save_embedding(storage, shared, MemoryKind::Working, &memory_id, text);
     Ok(())
+}
+
+fn assign_structured_ids(
+    parsed: &mut crate::llm::LlmExtractionResult,
+    memory_id: &str,
+    session_id: &str,
+    project_scope: &str,
+    timeline_source: &str,
+) {
+    const MAX_ITEMS_PER_KIND: usize = 32;
+
+    for fact in &mut parsed.facts {
+        fact.subject = fact.subject.trim().to_string();
+        fact.predicate = fact.predicate.trim().to_string();
+        fact.object = fact.object.trim().to_string();
+    }
+    parsed
+        .facts
+        .retain(|fact| !fact.subject.is_empty() && !fact.object.is_empty());
+    deduplicate_by_id(&mut parsed.facts, |fact| {
+        crate::ids::stable_id(memory_id, "fact", &[&fact.subject, &fact.predicate, &fact.object])
+    });
+    if parsed.facts.len() > MAX_ITEMS_PER_KIND {
+        crate::debug_log(&format!(
+            "structured fact limit reached; dropping {} items",
+            parsed.facts.len() - MAX_ITEMS_PER_KIND
+        ));
+    }
+    parsed.facts.truncate(MAX_ITEMS_PER_KIND);
+    for fact in &mut parsed.facts {
+        fact.fact_id = crate::ids::stable_id(
+            memory_id,
+            "fact",
+            &[&fact.subject, &fact.predicate, &fact.object],
+        );
+        fact.source_memory_id = Some(memory_id.to_string());
+        fact.session_id = session_id.to_string();
+        fact.project_scope = project_scope.to_string();
+        fact.timestamp = crate::core::extraction::EPOCH_ISO.to_string();
+    }
+
+    for item in &mut parsed.preferences {
+        item.preference = item.preference.trim().to_string();
+        item.topic = item
+            .topic
+            .take()
+            .map(|topic| topic.trim().to_string())
+            .filter(|topic| !topic.is_empty());
+    }
+    parsed
+        .preferences
+        .retain(|item| !item.preference.is_empty());
+    deduplicate_by_id(&mut parsed.preferences, |item| {
+        crate::ids::stable_id(memory_id, "preference", &[&item.preference, item.topic.as_deref().unwrap_or("")])
+    });
+    if parsed.preferences.len() > MAX_ITEMS_PER_KIND {
+        crate::debug_log(&format!(
+            "structured preference limit reached; dropping {} items",
+            parsed.preferences.len() - MAX_ITEMS_PER_KIND
+        ));
+    }
+    parsed.preferences.truncate(MAX_ITEMS_PER_KIND);
+    for item in &mut parsed.preferences {
+        item.id = crate::ids::stable_id(
+            memory_id,
+            "preference",
+            &[&item.preference, item.topic.as_deref().unwrap_or("")],
+        );
+        item.source_memory_id = Some(memory_id.to_string());
+        item.session_id = session_id.to_string();
+        item.project_scope = project_scope.to_string();
+        item.created_at = crate::core::extraction::EPOCH_ISO.to_string();
+    }
+
+    for item in &mut parsed.instructions {
+        item.instruction = item.instruction.trim().to_string();
+        item.topic = item
+            .topic
+            .take()
+            .map(|topic| topic.trim().to_string())
+            .filter(|topic| !topic.is_empty());
+    }
+    parsed
+        .instructions
+        .retain(|item| !item.instruction.is_empty());
+    deduplicate_by_id(&mut parsed.instructions, |item| {
+        crate::ids::stable_id(memory_id, "instruction", &[&item.instruction, item.topic.as_deref().unwrap_or("")])
+    });
+    if parsed.instructions.len() > MAX_ITEMS_PER_KIND {
+        crate::debug_log(&format!(
+            "structured instruction limit reached; dropping {} items",
+            parsed.instructions.len() - MAX_ITEMS_PER_KIND
+        ));
+    }
+    parsed.instructions.truncate(MAX_ITEMS_PER_KIND);
+    for item in &mut parsed.instructions {
+        item.id = crate::ids::stable_id(
+            memory_id,
+            "instruction",
+            &[&item.instruction, item.topic.as_deref().unwrap_or("")],
+        );
+        item.source_memory_id = Some(memory_id.to_string());
+        item.session_id = session_id.to_string();
+        item.project_scope = project_scope.to_string();
+        item.created_at = crate::core::extraction::EPOCH_ISO.to_string();
+    }
+
+    for item in &mut parsed.timeline {
+        item.date = item.date.trim().to_string();
+        item.description = item.description.trim().to_string();
+    }
+    parsed.timeline.retain(|item| !item.description.is_empty());
+    deduplicate_by_id(&mut parsed.timeline, |item| {
+        crate::ids::stable_id(memory_id, "timeline", &[&item.date, &item.description])
+    });
+    if parsed.timeline.len() > MAX_ITEMS_PER_KIND {
+        crate::debug_log(&format!(
+            "structured timeline limit reached; dropping {} items",
+            parsed.timeline.len() - MAX_ITEMS_PER_KIND
+        ));
+    }
+    parsed.timeline.truncate(MAX_ITEMS_PER_KIND);
+    for item in &mut parsed.timeline {
+        item.event_id =
+            crate::ids::stable_id(memory_id, "timeline", &[&item.date, &item.description]);
+        item.source = Some(timeline_source.to_string());
+        item.source_memory_id = Some(memory_id.to_string());
+        item.session_id = session_id.to_string();
+        item.project_scope = project_scope.to_string();
+        item.created_at = crate::core::extraction::EPOCH_ISO.to_string();
+    }
+}
+
+fn deduplicate_by_id<T>(items: &mut Vec<T>, mut id_for: impl FnMut(&T) -> String) {
+    let mut seen = std::collections::HashSet::with_capacity(items.len());
+    items.retain(|item| seen.insert(id_for(item)));
 }
 
 /// Session consolidation (matches consolidateDefaultMemories).
