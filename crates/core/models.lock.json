@@ -1,0 +1,24 @@
+{
+  "model_id": "all-MiniLM-L6-v2",
+  "repository": "sentence-transformers/all-MiniLM-L6-v2",
+  "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+  "model_file": "model.onnx",
+  "tokenizer_file": "tokenizer.json",
+  "dimension": 384,
+  "max_length": 256,
+  "pooling": "mean",
+  "files": [
+    {
+      "remote": "onnx/model.onnx",
+      "name": "model.onnx",
+      "size": 90405214,
+      "sha256": "6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452"
+    },
+    {
+      "remote": "tokenizer.json",
+      "name": "tokenizer.json",
+      "size": 466247,
+      "sha256": "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037"
+    }
+  ]
+}

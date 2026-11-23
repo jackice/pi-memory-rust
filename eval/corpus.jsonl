@@ -1,0 +1,20 @@
+{"id":"eval:cache","content":"项目使用带容量限制的 LRU 缓存管理每个项目的运行时，避免项目数量增加时内存持续增长。"}
+{"id":"eval:fts","content":"中文全文搜索通过 CJK bigram search_text 建立词项，独立 FTS Top-K 查询避免整句 phrase 匹配。"}
+{"id":"eval:vector","content":"向量检索应独立获取全局 Top-K 候选，不依赖 FTS allowlist；使用 embedding 模型做语义相似度排序。"}
+{"id":"eval:outbox","content":"turn_end 将用户提示和 assistant 回复写入持久化 outbox，后台 worker 通过 lease 重试提取任务。"}
+{"id":"eval:socket","content":"本地 Unix socket 使用 lock file 防止重复启动，目录权限 0700，socket 文件权限 0600。"}
+{"id":"eval:retain","content":"Retain 使用单个数据库事务保存 working memory 与结构化记忆，source hash 保证幂等更新。"}
+{"id":"eval:consolidation","content":"Consolidation 先 claim lease，再在事务外生成摘要，最后短事务校验版本并提交 episodic memory。"}
+{"id":"eval:model","content":"Embedding 模型下载使用固定 revision 和 SHA-256 manifest 校验，失败重试采用指数退避。"}
+{"id":"eval:compaction","content":"Session compaction 前排空规则 outbox，compact 后保存摘要 checkpoint 和 hash。"}
+{"id":"eval:privacy","content":"数据库目录限制为 0700，数据库文件和 Unix socket 限制为 0600，日志不写入记忆正文。"}
+{"id":"eval:scope","content":"项目 scope 隔离要求 clear 和 migrate 只操作目标项目数据库，迁移源以只读方式打开。"}
+{"id":"eval:backfill","content":"缺失或旧模型 embedding 由后台分批回填，空文本跳过并记录，避免重复扫描死循环。"}
+{"id":"eval:rrf","content":"混合召回将 FTS、vector 和 structured 三路独立排名通过 Reciprocal Rank Fusion 合并。"}
+{"id":"eval:expire","content":"过期或 superseded 的 working 与 episodic 记忆通过 purge 命令删除并同步清理向量。"}
+{"id":"eval:timeout","content":"单个 RPC 超时只放弃该请求，不销毁共享连接，也不影响其他 pending 请求。"}
+{"id":"semantic:worktree","content":"Parallel engineering tasks can each use a separate Git checkout and branch, allowing contributors to edit files concurrently without overwriting one another."}
+{"id":"semantic:timeout","content":"A caller deadline only ends its wait; the remote operation may still commit, so the same mutation must be safe to repeat."}
+{"id":"semantic:outbox","content":"Queued conversation extraction is written durably before processing; a newly started worker reclaims abandoned leases and continues the job."}
+{"id":"semantic:model-startup","content":"The encoder initializes on a background worker; lexical search remains available while vector scoring waits for the model."}
+{"id":"semantic:fusion","content":"A reciprocal-rank scheme combines the positions from keyword, embedding, and database-field searches into one relevance order."}

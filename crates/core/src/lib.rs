@@ -9,11 +9,13 @@ pub mod embedding_runtime;
 pub mod ids;
 pub mod llm;
 pub mod model_download;
+pub mod model_manifest;
 pub mod models;
 pub mod paths;
 pub mod protocol;
 pub mod runtime;
 pub mod storage;
+pub mod text;
 pub mod vector_index;
 
 /// Info-level diagnostic log: only written to stderr when PI_MEMORY_DEBUG=1 is set.

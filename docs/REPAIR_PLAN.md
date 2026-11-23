@@ -500,7 +500,7 @@ COMMIT;
 |---|---|---|---|
 | S1 FTS/DDL/`search_text` | Turso 0.7.2 上 10k 行能否稳定 `LIMIT` 下推；v1/v2 索引并存/切换是否可靠；多实例 lease 是否可重入；`search_text` 召回是否达标 | 1–2 天 | 先实现并验证替代 FTS 方案；PR-1.7 与依赖它的 PR-1.6 不得单独进入 v0.1.17。替代方案通过 CJK、Top-K、性能门槛后两项同批发布；否则两项都延后并明确该版本仍有中文召回 P0 |
 | S2 并发存储接口 | `TursoStorage` / `ProjectVectors` / `Connection` 是否能放进 `Arc<Mutex<ProjectRuntime>>` 并跨线程 | 0.5–1 天 | 退回“每项目一个 worker 线程 + channel”，M3 估算 +2–3 天 |
-| S3 structured LIKE 10k | 8/16 term × 多列 LIKE 的 P95 是否 ≤20ms | 0.5–1 天 | 默认降到 4–6 term，或 structured 四表也接 `search_text` + FTS |
+| S3 structured LIKE 10k | 默认 2-term 多列 LIKE 的 P95 是否 ≤20ms；另记录更高 term 扇出成本 | 0.5–1 天 | 保持 2-term 上限；若仍超时，限制最近 N 条或将 structured 四表接入 `search_text` + FTS |
 | S4 多语言模型 | 中文语义召回是否值得换模型 | 1–2 天 | 保留 `all-MiniLM`，PR-2.5 只留评估报告 |
 
 **关键路径**：S1 → M1 → M2 → S2 → M3 → M4。M4 的部分工作（eval 数据、文档）可与 M3 并行。
@@ -617,6 +617,10 @@ COMMIT;
 
 **验收**：上述测试全绿；`retain` 的 DB 写入在单事务内完成。
 
+**已覆盖**：`runtime::tests::retain_rejects_stale_llm_snapshot_without_writing_structured_data` 在提取/提交边界通过第二个 storage connection 更新 working，验证 retain 返回 `SNAPSHOT_CHANGED`，保留较新文本、不写 stale fact，也不推进 session checkpoint。运行时按明确可重试错误返回；重新读取并重跑 LLM 由 TS outbox worker 负责。
+
+**已覆盖**：`updating_consolidated_working_invalidates_and_reopens_the_whole_summary_set` 验证更新已汇总 turn 会让旧 episodic 失效，并同时重开其 `summary_of` 整组 working、清空 consolidation lease；新 worker 能 claim 整组并提交带新文本的新摘要。
+
 #### PR-1.3 Consolidation 事务 + 稳定 ID + 摘要 lease
 
 **目标**：Consolidation 的 DB 提交原子、可重试、并发不重复；**LLM/规则摘要生成不持有数据库事务**。
@@ -709,6 +713,10 @@ COMMIT;
 - 旧 `consolidateSessionMemories(llm_result)` 在未开启 `PI_MEMORY_LEGACY_CONSOLIDATION` 时返回 `SNAPSHOT_REQUIRED`，不会用可能过期的摘要提交；
 - `remaining_unconsolidated>0` 时调用方再跑一轮能收敛。
 
+**已覆盖**：`expired_consolidation_lease_fences_old_owner_and_recovers_once` 让旧 claim 的 20ms lease 过期，再由新 owner 接管；旧 owner 的 heartbeat 和 commit 均被拒，新 owner 成功提交，最终仅有一条 episodic。
+
+**已覆盖**：`consolidation_dirty_is_project_wide_across_sessions` 验证一个 session 完成时，不会清掉同项目另一个 session 的待汇总标记；dirty 检查与清除由单条条件 UPDATE 完成，避免跨进程 check-then-set 丢标记。
+
 **验收**：`turso_storage` + 新 `consolidation_tx` 测试全绿；代码 review 确认 `consolidate_session_memories` 中没有任何 `begin_tx` 包裹 LLM/规则摘要调用；`summary_of` 与 claim 集合一致的断言存在。
 
 
@@ -729,10 +737,10 @@ COMMIT;
     - 下载写 `.part` → 按 manifest 校验 size + SHA-256 → 匹配才 rename；不匹配删除 `.part`，换镜像重试，全部失败则 `Failed` 并给出“期望 hash/实际 hash”；
     - 本地 `PI_MEMORY_MODEL_PATH` 默认也按 manifest 校验；自定义模型必须提供 `PI_MEMORY_MODEL_MANIFEST`。`PI_MEMORY_MODEL_VERIFY=0` **只允许在开发/本地构建使用**（见下）；
     - manifest 更新流程：升级模型/revision → 运行脚本重新生成 → 像 lockfile 一样 review；旧 manifest 保留一个版本用于回滚；CI 校验 manifest 格式和文件列表，release 时校验实际下载物；
-    - manifest 的文件列表必须与 `MODEL_FILES` / `Embedder::load` 实际需要的文件一致（当前 `MODEL_FILES` 含 `config.json`，但下载/加载只要求两个文件，需统一）；
+    - manifest 显式标出 `model_file` / `tokenizer_file`，并列出这两个文件及 ONNX external data 等全部依赖文件；文件名必须安全且不可重复；
   - **`PI_MEMORY_MODEL_VERIFY=0` 的安全边界**：
     - 只在 `debug_assertions` 构建，或显式 `PI_MEMORY_ENV=development` 时生效；release/生产构建下**禁用该变量**（配置报错并拒绝进入自定义模型路径，不能静默降级）；
-    - 即使关闭 hash 校验，仍强制：文件存在且非空、`model.onnx` 可被 ONNX Runtime 加载、`tokenizer.json` 可解析、模型输入/输出维度与 `EMBEDDING_DIM` 一致、tokenizer 的模型类型/最大长度与注册表兼容、文本编码能做一次 smoke encode；
+    - 即使关闭 hash 校验，仍强制：manifest 文件存在且非空、ONNX 可被 Runtime 加载、tokenizer 可解析、实际 hidden size 与 manifest dimension 一致、tokenizer 最大长度和 pooling 与模型配置兼容、文本编码能做一次 smoke encode；
     - 只跳过“文件内容与 manifest 的 size/SHA-256/revision 比对”，不跳过结构/维度/tokenizer 检查；
     - 启动和 `diagnose` 打印 `model_verify=disabled` 的显式 warning，并在 `stats` 中标记 `unsafe_model=true`；
     - 自定义 manifest 必须是用户显式提供的绝对路径；仓库内 manifest 由 review 保证可信，运行时不从网络动态拉取 manifest；
@@ -777,11 +785,11 @@ COMMIT;
 - 模型未就绪时 retain 仍成功，backfill 在模型就绪后补齐（用 `FakeEmbedder` 或 ignore 的模型测试）；
 - 损坏/半截 `model.onnx` → `model_ready()==false`；请求路径不尝试加载；后台重试按退避进行；
 - 文件内容被篡改/下载到错误版本 → 与 manifest 的 `sha256` 不匹配，拒绝进入 `Ready`，错误信息包含期望/实际 hash；
-- 下载 URL 使用 pinned revision（测试断言不出现 `/main/`）；manifest 文件列表与 `MODEL_FILES` 一致；
+- 下载 URL 使用 pinned revision（测试断言不出现 `/main/`）；manifest 的模型/tokenizer 角色引用和全部文件依赖校验通过；
 - 自定义 `PI_MEMORY_MODEL_PATH` 未提供 manifest → 默认拒绝；
 - `PI_MEMORY_MODEL_VERIFY=0`：debug/dev 构建放行并打印 warning；release 构建禁用并报配置错误；
 - 关闭 hash 校验但模型维度错误 / tokenizer 不兼容 / ONNX 加载失败 → 仍拒绝进入 `Ready`；
-- manifest 缺失、格式错误、文件列表与 `MODEL_FILES` 不一致 → 构建/CI 失败；
+- manifest 缺失、格式错误、模型/tokenizer 角色未列入文件集或文件名重复 → 构建/CI 失败；
 - 不同长度文本 batch embedding 成功（覆盖 padding）；超长文本被截断且记录 warning；
 - embedding 结果带 special tokens（用固定 tokenizer 断言首尾 token）。
 
@@ -815,7 +823,7 @@ COMMIT;
 
 - 按 5.4 PR-2.1 的设计实现 `text.rs`、`search_text` 列、v2 FTS 索引、分批回填、`fts_state` 切换、查询改写和 `LIMIT`（schema/回填/查询改写的实际落地在本 PR，PR-2.1 只做收尾）；
 - **本 PR 只做 working/episodic 的 FTS**；structured 仍走旧 LIKE（PR-2.3 再改）；
-- 查询 SQL 不带 `project_scope` 谓词，依赖 DB 按项目隔离；若检测到 legacy 单 DB 多 scope，走慢路径并在 `diagnose` 警告；
+- 查询 SQL 不带 `project_scope` 谓词，依赖 DB 按项目隔离；若检测到 legacy 单 DB 多 scope，走慢路径并在 `diagnose` 警告；英文 query 只对有区分度的词项生成 FTS OR 查询，忽略 `how/the/and` 等函数词，全部为空时跳过 FTS；中文 bigram 保持不变；
 - 保留 v1 `fts(content)` 索引一个版本，`PI_MEMORY_FTS_MODE=content` 可回退；
 - 不在本 PR 调 BM25 权重或最终排序。
 
@@ -858,13 +866,15 @@ COMMIT;
 
 **验收**：PR-1.7 已合入；`hybrid_recall.rs` 在新 FTS 路径上通过；perf 记录写入 PR；v0.1.17 发布清单同时包含 PR-1.7 和 PR-1.6。
 
+**已覆盖**：`hybrid_recall.rs::vector_hit_outside_fts_is_included_in_hybrid_recall` 验证一条无关 FTS 候选不会限制相关 vector 候选进入最终注入；`vector_top_k_is_nonempty_when_fts_returns_no_candidates` 验证 FTS 为空时仍返回索引中全部 3 条向量候选。
+
 ### 5.4 M2：召回质量与结构化（P0/P1）
 
 > PR-2.1 和 PR-2.2 的“最小独立 Top-K”部分已前移到 M1（PR-1.6 / PR-1.7）。本节只描述 M2 的剩余工作：完整 RRF、structured 词项召回、元数据/去重、clear/迁移安全、多语言评估。
 
 #### PR-2.1 `search_text` + CJK 查询分析 + FTS Top-K（M2 收尾）
 
-> **注**：schema、`text.rs`、回填、v2 索引、查询改写已在 PR-1.7 落地。本 PR 在 M2 只做：10k 真实数据性能复核、`ngram` spike、legacy 单 DB 多 scope 慢路径、迁移/回滚演练，以及 PR-1.7 遗留的查询形状问题。下面的设计保留作为实现依据，不重复开发。
+> **注**：schema、`text.rs`、回填、v2 索引、查询改写已在 PR-1.7 落地。本 PR 在 M2 收尾：补 legacy 单 DB 多 scope 慢路径、迁移/回滚演练，以及 PR-1.7 遗留的查询形状问题。当前 10k 合成数据性能门槛通过；真实项目数据复核仍需要项目语料。`ngram` 单行 spike 已验证基本 CJK/英文查询均能命中，但未跑 10k 性能与召回比较，因此不发布该模式，继续默认使用 `search_text`。
 
 **目标**：中文子串/长 query 可检索；FTS 真正走 `LIMIT` 和 BM25。
 
@@ -894,7 +904,7 @@ COMMIT;
   - 不再在 SQL 里带 `project_scope`；DB 已按项目隔离。若检测到单 DB 多 scope（旧迁移数据），走 `legacy_scoped` 慢路径并在 `diagnose` 警告；
   - 返回真实 BM25 分数，不再在运行时算百分位；
   - spike 时确认“多列 SELECT + LIMIT”仍能匹配 Turso 的 FTS 模式；如果额外列导致不匹配，改成两步：先 `SELECT rowid, fts_score(...) ... LIMIT` 拿 id，再按 id 取行。
-- spike（1 天）：验证 `WITH (tokenizer='ngram')` 是否能达到同样效果；若可以，保留为可选开关 `PI_MEMORY_FTS_MODE=ngram`，默认 `search_text`。
+- 可选 spike：单行探针已验证 `WITH (tokenizer='ngram')` 的基本 CJK/英文命中；要启用仍需真实规模的性能、排序和召回对比。当前 `PI_MEMORY_FTS_MODE=ngram` 明确报错；未完成该门槛前不得把它写成可用配置。
 
 **测试**：
 
@@ -904,6 +914,7 @@ COMMIT;
 - `EXPLAIN QUERY PLAN` 不再出现 `USE SORTER FOR ORDER BY`（确认 limit 下推）；
 - BM25 分数单调，且不是 `1 - index/(total+1)`；
 - 英文 query 不回归；
+- 英文长 prompt 的函数词不产生大量无关 FTS 候选；仅含函数词时安全跳过 FTS，中文 bigram 查询不受影响；
 - 旧 DB 迁移后 `search_text` 回填、FTS 可查。
 
 **验收**：`tests/turso_storage.rs::turso_tantivy_fts_match_search` 更新为新语义；新增 `cjk` 与 `topk` 测试。
@@ -946,7 +957,7 @@ COMMIT;
   - `PI_MEMORY_STRUCTURED_TOP_K=30`
   - `PI_MEMORY_RRF_K=60`
   - `PI_MEMORY_RECALL_MIN_SCORE=0.012`（约等于 rank 1 的 `1/61` 下限；按 eval 调整）
-  - `PI_MEMORY_RECALL_RELATIVE_CUTOFF=0.5`
+  - `PI_MEMORY_RECALL_RELATIVE_CUTOFF=0.2`（40 条跨语言诊断集中，0.5 会丢弃 vector rank 1–5 的独立候选；0.2 降低该损失）
 
 **测试**：
 
@@ -975,14 +986,14 @@ COMMIT;
   - 排序：facts 按 `confidence DESC, timestamp DESC`；其余按 `created_at DESC`；
   - `LIMIT ?`；
 - `runtime::query_structured_candidates`：
-  - 用 `text::terms(prompt)`，空则跳过；默认最多 8 个 term，硬上限 16；优先保留较长/去停用词的 term，避免把“怎样/避免/多个”这类噪声全带进去；
+  - 用 `text::structured_recall_terms(prompt)`，空则跳过；优先保留较长/去停用词的 term，并从长 prompt 尾部采样后默认最多选择 2 个（`PI_MEMORY_STRUCTURED_TERM_LIMIT` 可配置，最高 3），避免把“怎样/避免/多个”这类噪声和高 LIKE 扇出带入查询；
   - structured score：facts `0.4 + 0.2*confidence`，其余 0.5；作为 RRF 之外的 tie-break/诊断；
 - 保留旧 `search_*_like` 作为 legacy 测试/迁移，不再用于 recall。
 
 **性能门槛（不再是“记录一下”）**：
 
-- 10k facts + 10k preferences/instructions 的合成数据上，structured 查询 P95 ≤ 20ms，`buildRecallInjection` 端到端 P95 ≤ 100ms；
-- 如果超过：默认 term 降到 4–6 个、只查当前 project 的最近 N 条，或把 structured 四表也接入 `search_text` + FTS（与 working/episodic 同一方案）；
+- facts/preferences/instructions/timeline 四个表各 10k 行的合成数据上，structured 查询 P95 ≤ 20ms，`buildRecallInjection` 端到端 P95 ≤ 100ms；
+- 如果超过：默认 term 降到 2 个、只查当前 project 的最近 N 条，或把 structured 四表也接入 `search_text` + FTS（与 working/episodic 同一方案）；
 - 在 PR-2.3 合并前跑一次 10k bench；不达标不允许把 structured terms 设为默认路径，先保留 legacy `LIKE` + 开关。
 
 **测试**：
@@ -991,9 +1002,11 @@ COMMIT;
 - prompt 为整句但 fact 是子串 → 命中；
 - `active=0` instruction 不命中；
 - 过期 working/episodic 不命中（structured 的过期不在本 PR 范围）；
-- 10k structured 行、8/16 terms 的 P95 达标（写入 benchmark 输出，作为合并门槛）。
+- structured 四表各 10k 行、最终默认的 2 terms 路径 P95 ≤ 20ms（写入 benchmark 输出，作为合并门槛）；更高 term 数仅用于衡量未限流时的成本，不允许作为默认路径。
 
 **验收**：e2e 改用真实长 prompt，不再用 `"中文"` 这种特例；10k bench 的 structured P95 ≤ 20ms，否则先走 FTS 回退方案，不默认开启。
+
+**已覆盖**：`llm_integration::recall_with_llm_extracted_structured` 使用长中文 prompt 验证事实子句召回，并断言 inactive instruction 不进入结果。
 
 #### PR-2.4 元数据生效 + consolidated 去重 + 模型版本过滤
 
@@ -1009,7 +1022,7 @@ COMMIT;
 - `instructions.active` 过滤；
 - `facts.confidence` 参与排序（PR-2.3 已做）；
 - `hydrate` 只加载当前 model；`diagnose` 显示 stale 数量；
-- 新增 `purge_expired`：删除过期 working/episodic + 对应 embeddings + 从向量索引移除；启动/`/memory purge` 触发。
+- 新增 `purge_expired`：在单事务内用集合式 SQL 删除过期 working/episodic 与对应 embeddings，返回计数而不把全部 ID 载入内存；启动/`/memory purge` 触发，随后重建向量索引并保留 FTS dirty 状态。
 
 **测试**：
 
@@ -1035,16 +1048,21 @@ COMMIT;
   - `bge-small-zh-v1.5`（512）
   - `multilingual-e5-small`（384）
 - 指标：Recall@5、MRR、P50/P95、模型大小、冷启动；
+- 提供本地候选模型对比入口：每个候选使用独立临时 DB、相同 fixture 和 query 集；模型配置由 pinned manifest 提供维度、输入/池化和 query/document 前缀；
 - 如果切换：
   - `Embedder` 支持 2/3 输入、动态 hidden size、pooling（mean/cls）；
-  - `EmbeddingModel { id, dim, files, pooling }` 注册表；
+  - manifest 驱动的模型配置（id、dim、files、pooling、可选 query/document prefix）；
   - `memory_embeddings.model` 写入新 id；旧向量 hydrate 时忽略；
+  - 每个 memory/model id 单独保留 embedding，模型回滚可复用旧向量；
+  - schema version 递增，旧的 `(memory_kind, memory_id)` 主键幂等迁移为 `(memory_kind, memory_id, model)`；
   - `rebuild-embeddings` 全量重建；
   - 迁移文档/回滚开关 `PI_MEMORY_EMBEDDING_MODEL`。
 
-**决策门槛**：在中文标注集上，新模型 Recall@5 相对现状提升 ≥10 个百分点，且 P95 不退化 >20%，才默认切换；否则保留现状，仅提供可选模型。
+**决策门槛**：在中文标注集上，新模型 Recall@5 相对现状提升 ≥10 个百分点，且 P95 不退化 >20%，才默认切换；否则保留现状，仅提供可选模型。用户已选择继续使用当前 `all-MiniLM-L6-v2`，不因缺少候选模型语料/标注而暂停其余优化；因此当前不切换模型，候选比较不作为本次完成条件。
 
 **估算**：评估 1 天；切换实现 2–3 天。
+
+**当前证据（2026-11-23）**：`eval/semantic-recall.jsonl` 有 40 条跨语言释义，覆盖 20 个目标记忆；英语 query 指向中文记忆，中文 query 指向英语记忆，nightly/手动 workflow 会同时运行。`--explain-misses` 证实 common English function words 制造了无关 FTS 候选，旧的 0.5 relative cutoff 还会删除高排名的单路 vector 结果。现已在 v2 FTS 查询中忽略英文函数词，并把默认 relative cutoff 调到 0.2。当前模型的 regular 40-case bilingual fixture hybrid Recall@5/10 为 0.775/0.850，MRR 0.6525，nDCG@10 0.6941；semantic fixture hybrid Recall@5/10 为 0.525/0.650，vector-only Recall@5/10 为 0.500/0.650。中文 semantic 子集 hybrid/vector Recall@5 为 0.10/0.00，跨语言中文语义召回仍弱。**用户已明确选择保留当前模型**；这组指标作为当前模型的合成基线，不声称代表真实项目质量，也不触发模型切换。详见 `eval/README.md`。
 
 #### PR-2.6 `/memory clear` 语义 + 迁移 scope 安全（从 M4 前移）
 
@@ -1056,7 +1074,7 @@ COMMIT;
   - `target` 为空 → 当前 `project_scope`；
   - `target` 非空 → 通过 server `StoragePool` 打开目标 project 的 DB 再清，不再用当前 DB 的全局表；
   - **DB 删除在单事务内完成**：先按 scope 收集待删除的 working/episodic id（用于清向量），再删除 `working_memory` / `episodic_memory` / `facts` / `preferences` / `instructions` / `timeline` / `session_state` / `memory_embeddings`；embeddings 通过 `(memory_kind, memory_id)` 关联删除；并在同一事务中持久化 `fts_dirty=true`、`needs_rehydrate=true`，防止 DB 删除提交后、内存索引失效前进程异常造成旧索引被继续信任；
-  - `clear all` 表示“所有 project scope”，不是“所有表无过滤”。实现为逐 scope 事务；跨 scope 不承诺单事务，返回每个 scope 的状态；dirty 标记按 scope 持久化（例如 `fts_dirty:<scope>` / `needs_rehydrate:<scope>`），或使用等价的 per-scope 状态表；只有在所有 scope 重建成功后才清除全局汇总标记，避免一个 scope 重建成功就清掉另一个 scope 的待恢复状态；
+  - `clear all` 表示“所有 project scope”，不是“所有表无过滤”。除枚举项目 DB 外，还要枚举每个 DB 内的 logical `project_scope`，覆盖旧版单 DB 多 scope 迁移数据；实现为逐 scope 事务、每个 DB 只重建一次索引；跨 scope 不承诺单事务，返回每个 scope 的状态；dirty 标记按 scope 持久化（例如 `fts_dirty:<scope>` / `needs_rehydrate:<scope>`），或使用等价的 per-scope 状态表；只有在所有 scope 重建成功后才清除全局汇总标记，避免一个 scope 重建成功就清掉另一个 scope 的待恢复状态；
   - 全项目清理必须显式 `all` + 二次确认（`confirm` 文案写明不可恢复）；
 - **事务外重建**：commit 后重建目标 project 的 FTS 和向量索引（`hydrate`/`rebuild-embeddings`）。若重建失败：
   - **不能返回“clear 失败、已回滚”**，因为 DB 删除已经提交；
@@ -1143,6 +1161,8 @@ COMMIT;
 
 **验收**：并发测试 + 冷启动测试稳定。
 
+**已覆盖**：`pi_memory_server::tests::busy_project_runtime_does_not_block_another_project` 在独立线程持有项目 A 的 runtime 锁时，验证项目 B 能获取自己的 runtime 锁并完成一次 DB 访问。`crates/core/tests/socket_server.rs` 增加了双进程同时冷启动、单监听者、目录/socket/lock 权限和 shutdown 清理验证；当前受限沙箱禁止 AF_UNIX `bind`（`Operation not permitted`）时会显式跳过，其余失败仍会报错。
+
 #### PR-3.2 RPC 超时分级 + 不销毁共享连接
 
 **目标**：单请求超时不影响其他请求/会话；同时明确“超时 ≠ 取消”。
@@ -1153,7 +1173,7 @@ COMMIT;
 - 当前没有取消协议；不要因为超时就假设写操作没发生；
 - 同一连接上的请求是串行处理的：一个慢请求超时后，服务端可能仍在跑，后续请求会排队；超时不释放服务端容量；
 - 因此所有写请求必须幂等：`retain` 用确定性 ID + 事务；`consolidate` 用 claim lease + stable id + 提交前版本校验；`enqueueTurn` 用 `(session_id,turn_index)` 主键；`clear` 用确认 + 幂等删除；`migrate` 不自动重试，改为 job/status；
-- 长操作（`prepareModel`/`migrate`/`rebuild-embeddings`）改为“启动 job + 立即返回 + 轮询状态”，不靠长超时占着连接。
+- 长操作（`prepareModel`/`migrate`/`rebuild`/`rebuild-embeddings`/`clear`/`purge`）改为“启动 job + 立即返回 + 轮询状态”，不靠长超时占着连接；`rebuild` job 依次重建 FTS 与内存向量索引，并在失败时保留 `partial` 恢复状态；`clear all confirm` 的每个 scope 状态保存在 job 详情中。
 
 **改动**：
 
@@ -1165,7 +1185,7 @@ COMMIT;
   - 连续 N 次超时/连接无响应才标记 transport unhealthy，避免单次慢请求触发重连风暴；
   - `shutdown` 在 socket 模式只 `conn.destroy()`，不发全局 shutdown；
 - `server`：
-  - 新增 `startJob`/`jobStatus`（或按方法返回 `{jobId}`），先用于 `prepareModel`/`migrate`/`rebuild-embeddings`；
+  - 新增 `startJob`/`jobStatus`（或按方法返回 `{jobId}`），用于 `prepareModel`/`migrate`/`rebuild`/`rebuild-embeddings`/`clear`/`purge`；
   - `migrate` 只锁目标 project；job 内部仍要保证幂等/可重试；
   - 可选：为 `retain/consolidate` 加 `idempotencyKey`；当前确定性 ID/claim 已可重试，先不加协议字段。
 
@@ -1209,6 +1229,7 @@ COMMIT;
     - `retainTurnMemories` 返回 `snapshot_changed` 时：**不能用旧 `llm_result` 重试**；重新读取当前 working 文本（working 存在且比 pending 新时以 working 为准，否则用 pending 文本），重新调用 LLM 后再 retain；最多 2 次，仍冲突则 `failPendingTurn` 记录错误，等待下次重试；
     - 如果 retain 成功但 complete 失败：lease 过期后重试会再次调用 LLM，但 retain 幂等；可接受（at-least-once）；也可在 retain 成功后先写 `last_retain_at`，重试时跳过 LLM 直接 complete；
   - `session_start`：drain 一次；
+  - `turn_end` 的 outbox drain 完成后检查 count/dirty，达到阈值立即安排后台 consolidation；
   - `session_shutdown`：最多等 2s drain，剩余留给下次启动；
 - 保留同步 `retainTurnMemories` 路径，供测试/命令使用。
 
@@ -1268,7 +1289,8 @@ COMMIT;
 - 执行方式：
   - 后台任务，不阻塞 `turn_end`；复用 PR-1.3 的 claim/heartbeat/commit RPC + stable id，保证并发/重试只产生 1 条；LLM 摘要同样在事务外；
   - LLM 可用时生成摘要，不可用/超时走规则拼接并标 `degraded=true`；
-  - 失败退避，不无限重试；`diagnose` 显示上次尝试、失败原因、待 consolidate working 数；
+  - 失败按 session 指数退避（2s 起步、最长 5m），不无限重试；手动命令可绕过冷却；`diagnose` 显示本进程上次尝试、连续失败数、下次重试、失败原因和待 consolidate working 数；
+  - consolidation LLM 输入单独限额（`PI_MEMORY_CONSOLIDATE_MAX_INPUT_BYTES`，默认 64 KiB）；超限不截断工作记忆，而是跳过 LLM、用完整内容生成规则摘要并标记 degraded，诊断记录预算跳过次数；
   - 单 session 同时只允许一个 consolidation job；跨进程用 lease/claim；
 - 用户控制：
   - `PI_MEMORY_AUTO_CONSOLIDATE=0` 关闭自动，仅保留手动命令；
@@ -1365,17 +1387,17 @@ COMMIT;
 | 11 | `batch_embedding_no_orphans` | Rust unit | 重复回填 index_len 不变 | P1 |
 | 12 | `fts_cjk_substring_hits` | Rust integration | “向量”命中 | P0 |
 | 13 | `fts_topk_bm25_limit` | Rust integration | ≤K 条、分数非百分位 | P0 |
-| 14 | `hybrid_vector_outside_fts` | Rust integration (Fake) | 最终 Top-6 含 vector 命中 | P0 |
-| 15 | `vector_topk_when_fts_empty` | Rust integration (Fake) | 返回 K 条，不是 1 条 | P0 |
-| 16 | `structured_long_prompt_hits` | Rust integration | 长 prompt 命中 fact | P0 |
+| 14 | `hybrid_vector_outside_fts` | Rust integration (Fake) | 最终 Top-6 含 vector 命中 (`hybrid_recall.rs`) | P0 |
+| 15 | `vector_topk_when_fts_empty` | Rust integration (Fake) | 返回索引中全部 Top-K 候选，不是 1 条 (`hybrid_recall.rs`) | P0 |
+| 16 | `structured_long_prompt_hits` | Rust integration | 长 prompt 命中 fact、inactive instruction 不召回 (`llm_integration.rs`) | P0 |
 | 17 | `metadata_filters` | Rust integration | 过期/superseded/inactive 不召回 | P1 |
-| 18 | `socket_cold_start_single_server` | Rust/TS integration | 只有一个监听 | P1 |
-| 19 | `concurrent_projects_not_blocked` | Rust/TS integration | 慢请求不阻塞另一项目 | P1 |
-| 20 | `timeout_does_not_destroy_connection` | TS unit | 下一个 call 成功；超时的 retain 仍完成，重试不重复 | P1 |
+| 18 | `socket_cold_start_single_server` | Rust process integration (`socket_server.rs`) | 双进程冷启动仅一进程存活；权限 0700/0600；shutdown 后清理 socket（受限沙箱拒绝 bind 时显式跳过） | P1 |
+| 19 | `concurrent_projects_not_blocked` | Rust server unit (per-project lock) | 项目 A 持锁时，项目 B 可并发进入 runtime (`busy_project_runtime_does_not_block_another_project`) | P1 |
+| 20 | `timeout_does_not_destroy_connection` | TS unit (`timeout.test.ts`) | 一个 socket call 超时后其他 pending 仍成功；迟到响应被忽略；stdio 超时不 kill 进程 | P1 |
 | 21 | `turn_end_fast_with_slow_llm` | TS lifecycle | <100ms 返回 | P1 |
-| 22 | `pending_turns_replay` | TS integration | 重启后仍能处理 | P1 |
+| 22 | `pending_turns_replay` | Rust storage reopen + TS lifecycle (`pending_turn_outbox_survives_storage_reopen_and_reclaims_expired_claim`, `session_start replays a durable pending turn after restart`) | DB 重开后 pending 与过期 lease 仍可恢复；`session_start` 重新 claim、retain 并完成 | P1 |
 | 23 | `compaction_flushes_pending` | TS lifecycle | before_compact drain | P2 |
-| 24 | `recall_metrics_eval` | eval binary | Recall@5/10 可重复 | P2 |
+| 24 | `recall_metrics_eval` | eval binary + nightly workflow | default 40-case and cross-lingual semantic 40-case fixtures report Recall@5/10, MRR, nDCG, latency by language; `--explain-misses` attributes target losses to source ranks and filters | P2 |
 | 25 | `clear_scope_semantics` | Rust/TS | target 不同时不误清当前；all 需确认 | P0 |
 | 26 | `outbox_claim_lease` | Rust integration | 两 worker 只有一个 claim；lease 过期可恢复 | P1 |
 | 27 | `fts_v2_switch_preserves_v1` | Rust integration | v2 创建/切换失败时 v1 仍可查；状态不脏 | P0 |
@@ -1385,13 +1407,13 @@ COMMIT;
 | 31 | `model_checksum_rejects_corrupt` | Rust unit | 与 manifest 的 size+SHA-256 比对；不匹配不进入 Ready；pinned revision | P1 |
 | 32 | `model_failed_retry_backoff` | Rust unit | 请求路径不重试；后台按退避重试 | P1 |
 | 33 | `embed_batch_mixed_lengths` | Rust unit | 不同长度 batch 成功；超长截断 | P1 |
-| 34 | `poison_and_conn_count_recovery` | Rust/TS | panic 后连接数归零；锁中毒可重启 | P1 |
-| 35 | `content_map_bounded` | Rust unit | 超限后 LRU 裁剪，仍能召回 | P2 |
-| 36 | `auto_consolidation_headless` | TS lifecycle | 无 UI/不 quit 也能产生 episodic | P1 |
+| 34 | `poison_and_conn_count_recovery` | Rust server unit (`connection_count_guard_decrements_during_panic_unwind`, `poisoned_project_runtime_recovers_and_rehydrates`) | panic unwind 后连接计数归零；runtime 锁清 poison、回滚并重建向量索引后可继续使用 | P1 |
+| 35 | `content_map_bounded` | Rust runtime design | `ProjectVectors` 不缓存记忆正文，只保存 `(kind,id)` 映射并按需从 DB 加载候选；跨项目 runtime 由容量受限 LRU 驱逐 | P2 |
+| 36 | `auto_consolidation_headless` | TS lifecycle | headless 下 `turn_end` drain 后达到阈值会触发 consolidation；不依赖 quit/UI | P1 |
 | 37 | `consolidated_working_not_recalled` | Rust integration | working 与 episodic 不重复注入 | P1 |
 | 38 | `recall_min_score_drops_irrelevant` | Rust unit | 全不达标时注入为空 | P1 |
-| 39 | `recall_merge_no_quadratic` | Rust bench | 3×50 候选合并 <5ms | P2 |
-| 40 | `session_fallback_unique` | TS unit | 缺 sessionManager 时 id 不冲突 | P1 |
+| 39 | `recall_merge_no_quadratic` | Rust bench (`pi-memory-bench --merge-only`) | 3×50 候选 RRF 合并输出 P50/P95/max，P95 对照 5ms 门槛 | P2 |
+| 40 | `session_fallback_unique` | TS lifecycle (`missing sessionManager uses a stable process-scoped fallback ID`, `sessionManager ID takes priority over PI_SESSION_ID`, `blank sessionManager ID falls back to PI_SESSION_ID`) | manager 优先；空值继续查 env；都缺失时使用当前进程稳定且非默认值的随机 ID | P1 |
 | 41 | `consolidate_partial_claim_no_stall` | Rust integration | 输入含已 consolidated 行时不整体回滚；只处理未处理子集 | P0 |
 | 42 | `consolidate_disjoint_claims_cover_all` | Rust integration | 两 worker 子集不相交时覆盖全部 working，无重复 claim | P0 |
 | 43 | `retain_same_turn_text_change_replaces` | Rust integration | 同 ID 新文本替换 structured，旧行不残留，source_sha 更新 | P0 |
@@ -1410,14 +1432,24 @@ COMMIT;
 | 56 | `consolidate_claim_commit_rpc` | Rust/TS integration | claim → LLM/heartbeat → commit；集合严格一致 | P0 |
 | 57 | `consolidate_heartbeat_expiry` | Rust/TS integration | 停止心跳后 lease 过期，旧 token commit 被拒，新 owner 可完成 | P0 |
 | 58 | `consolidate_token_invalid_after_restart` | Rust/TS integration | server 重启后旧 token `CLAIM_EXPIRED`；不会误提交其他行 | P1 |
-| 59 | `retain_snapshot_conflict_retries` | Rust integration | 提取期间同 turn 文本更新，旧 snapshot 不提交；有限重试后收敛或明确返回可重试错误 | P0 |
+| 59 | `retain_snapshot_conflict_retries` | Rust unit（第二 DB connection）+ TS integration | 提取期间同 turn 文本更新，旧 snapshot 不提交；Rust 明确返回可重试错误，TS outbox 重新读取并重跑 LLM | P0 |
 | 60 | `fts_expired_leader_fenced` | Rust integration | 新 leader 接管后旧 fencing token 的回填写入/phase 更新/状态切换全部被拒绝；旧 leader 的幂等建索引不影响最终状态 | P0 |
 | 61 | `clear_dirty_state_survives_restart` | Rust integration | 删除事务提交后进程重启仍识别 dirty 状态，不从旧向量索引召回 | P1 |
 | 62 | `old_server_write_then_new_server_rebuilds_fts` | Rust integration | 旧版写入导致 `search_text` 为 NULL；新版先回退 v1 保证召回，再回填并安全切回 v2 | P1 |
-| 63 | `consolidated_working_update_reconsolidates` | Rust integration | 更新已 consolidated working → 旧 episodic 失效、整组重新 claim；新 episodic 覆盖最新内容 | P0 |
-| 64 | `migrate_crash_before_rebuild_dirty` | Rust (feature) | 导入事务提交后崩溃 → 重启仍识别 `index_state=partial`，不信任空索引，重建后恢复 | P0 |
-| 65 | `clear_all_dirty_scope_isolation` | Rust integration | `clear all` 逐 scope 重建时，一个 scope 失败不会清除其他 scope 的 dirty 标记 | P1 |
-| 66 | `outbox_snapshot_conflict_retries` | TS integration | `snapshot_changed` 后重读最新文本并重跑 LLM，旧结果不落库；耗尽后 pending 保留 | P1 |
+| 63 | `compaction_failure_is_nonblocking` | TS lifecycle (`session_compact_failed records the failure without disrupting the session`) | compact 失败 hook 不抛异常、不发 RPC，主会话可继续 | P2 |
+| 64 | `consolidated_working_update_reconsolidates` | Rust integration | 更新已 consolidated working → 旧 episodic 失效、整组重新 claim；新 episodic 覆盖最新内容 | P0 |
+| 65 | `migrate_crash_before_rebuild_dirty` | Rust (feature) | 导入事务提交后崩溃 → 重启仍识别 `index_state=partial`，不信任空索引，重建后恢复 | P0 |
+| 66 | `clear_all_dirty_scope_isolation` | Rust integration | `clear all` 逐 scope 重建时，一个 scope 失败不会清除其他 scope 的 dirty 标记 | P1 |
+| 67 | `outbox_snapshot_conflict_retries` | TS integration | `snapshot_changed` 后重读最新文本并重跑 LLM，旧结果不落库；耗尽后 pending 保留 | P1 |
+| 68 | `fts_migration_heartbeat_survives_default_production_lease` | Rust process integration | 默认 30 秒 TTL 下回填持续超过原始租约；心跳续约有效、第二实例不能接管，释放后迁移切换成功 | P0 |
+| 69 | `structured_recall_10k_gate` | Rust benchmark (`pi-memory-bench --assert-gates`) | 每张 structured 表至少 10k 行；structured 查询 P95 ≤20ms、端到端 recall P95 ≤100ms，否则返回失败状态 | P0 |
+| 70 | `fts_query_filters_english_stop_words` | Rust unit/storage | 英文函数词不进入 FTS OR 查询；只含函数词时返回空候选；CJK bigram 保持原样 | P1 |
+| 71 | `recall_budget_dedup_and_quota` | Rust unit (`runtime::tests`) | 验证 CJK/英文 token 估算、预算上限和超额丢弃、规范化近似去重、主题相似度过滤与类别配额诊断 | P2 |
+| 72 | `purge_expired_scope_and_vector_consistency` | Rust storage integration (`turso_storage.rs`) | 只清理目标 scope 的过期/superseded working/episodic，并同步删除 embeddings；清孤儿 embedding 后重建向量索引，索引规模与剩余有效记忆一致 | P1 |
+| 73 | `diagnose_reports_operational_cost_metrics` | TS lifecycle (`lifecycle.test.ts`) | 完成一次带 recall 与 LLM 的 turn 后，`/memory diagnose` 输出每百 turn LLM 调用/估算 token/注入记忆数、outbox 深度和 consolidation pending 数 | P2 |
+| 74 | `private_project_database_permissions` | Rust Unix integration (`turso_storage.rs`) | 项目数据目录各级为 `0700`，主数据库为 `0600`；SQLite sidecar 受私有目录保护 | P1 |
+| 75 | `project_runtime_lru_skips_shared_runtimes` | Rust server unit (`pi-memory-server`) | 超限时保留当前/仍被引用 runtime，按 `last_access` 驱逐最老 idle 项目；引用释放后可被驱逐 | P2 |
+| 76 | `retain_repairs_legacy_partial_turn` | Rust integration (`llm_integration.rs`) | 旧 `partial` turn 从 working 内容重放可恢复规则项，删除旧 LLM-only 结构化项，并迁移为 `rule_complete` | P0 |
 
 **测试数据隔离**：所有 Rust 集成测试使用临时目录 + 独立 DB；embedding 相关测试优先用 `FakeEmbedder`，真实模型测试标 `#[ignore]`，CI 不依赖模型下载。
 
@@ -1457,8 +1489,8 @@ INSERT OR IGNORE INTO fts_migration_lock(id) VALUES (1);
 
 **多实例规则（必须）**：迁移只允许一个 leader 执行；所有实例的查询都不等锁，也不因为别人迁移而阻塞。
 
-- **获取 lease**：在短事务里条件更新 owner/expiry 并递增 fencing token；只有 `changes()==1` 才算 leader。TTL 默认 30s。每次接管都获得更大的 token，旧 leader 的 token 永远不能重新生效；旧锁表需按启动迁移步骤幂等补上该列。
-- **心跳与写入 fencing**：leader 每 10s 续期；owner/token 校验必须与每批回填写入处于同一短事务，不能“先检查、之后单独写”，避免旧 leader 暂停后在新 leader 接管后继续写。**状态切换必须在持有有效 token 的事务内校验**；`CREATE INDEX IF NOT EXISTS` 可重复执行，旧 leader 创建同名索引本身无害，但旧 leader **不能设置 `fts_phase` 或切换 `fts_state`**；创建后必须重新校验 token，再进入 `index_ready`。失去 lease 的实例立即停止。
+- **获取 lease**：在短事务里条件更新 owner/expiry 并递增 fencing token；只有 `changes()==1` 才算 leader。TTL 默认 30s。expiry 到期允许竞争者尝试接管；原 owner 可在 token 未变化时续期，续期与接管由条件更新原子仲裁。每次成功接管都获得更大的 token，旧 leader 的 token 永远不能重新生效；旧锁表需按启动迁移步骤幂等补上该列。
+- **心跳与写入 fencing**：leader 每 10s 续期；续期和每批回填都校验 owner/token，不能“先检查、之后单独写”，避免旧 leader 暂停后在新 leader 接管后继续写。**状态切换必须在持有当前 token 的事务内校验**；`CREATE INDEX IF NOT EXISTS` 可重复执行，旧 leader 创建同名索引本身无害，但旧 leader **不能设置 `fts_phase` 或切换 `fts_state`**；创建后必须重新校验 token，再进入 `index_ready`。owner/token 不再匹配的实例立即停止。
 - **非 leader**：直接按当前 `fts_state` 提供查询；记录 `diagnose` 信息（当前 owner/expiry），不执行任何回填或 DDL。
 - **leader 崩溃**：lease 到期后，下一次启动或定期检查的实例可接管；所有步骤必须可重入，从 `fts_phase` / `search_text IS NULL` 的实际状态继续。
 - **读者一致性**：`fts_state` 只在“v2 索引已创建且通过探测查询”之后切换；切换是单条小事务。读者在一次查询开始时读取 `fts_state`，因此只会看到切换前或切换后的完整状态，不会看到“状态已切、索引还没建”的中间态。`fts_state` 可以在进程内缓存，但必须在每次 recall 前校验版本（例如 `app_meta.fts_version`）或短 TTL 刷新；不能只在启动时读一次，否则另一个实例切换后本实例会一直走旧索引。
@@ -1469,7 +1501,7 @@ INSERT OR IGNORE INTO fts_migration_lock(id) VALUES (1);
 0a. **版本回滚后的完整性检查**：新 server 开始对项目提供 recall 前，检查 `fts_state=search_text` 时 `search_text IS NULL` 的行数。若非零（例如旧 server 在回滚期间写入了不认识 `search_text` 的行），先原子地将 `fts_state` 切回 `content`、设置 `fts_dirty=true` / `fts_phase=backfilled`，再提供查询；不能在 NULL 未回填时继续只查 v2。随后由迁移 leader 回填 NULL、验证 v2、再切回 `search_text`。检查应在服务开放查询前完成；迁移中的常规新版本实例仍遵守单 leader 规则。
 1. `ALTER TABLE working_memory ADD COLUMN search_text TEXT`；episodic 同理；已有列则跳过。两个实例可能同时做这一步：先查 `PRAGMA table_info`，并把 “duplicate column” 错误视为已存在，不要把它当成迁移失败。旧 FTS 仍索引 `content`，`fts_state` 保持 `content`。
 2. **尝试获取迁移 lease**。失败则跳过迁移，继续按 `fts_state` 查询；不要并发回填、不要并发建索引。
-3. leader 分批回填：`WHERE search_text IS NULL`，每批 500 行，写入 `build_search_text(content)`；空内容写 `''`。每批提交，旧索引和旧查询路径不受影响；每批前检查 lease 并心跳。`fts_phase=backfilling`。
+3. leader 分批回填：`WHERE search_text IS NULL`，每批最多 100 行，写入 `build_search_text(content)`；空内容写 `''`。较小批次缩短写事务并让续期更快持久化；旧索引和旧查询路径不受影响；每批前检查 lease 并心跳。`fts_phase=backfilling`。
 4. 校验：`SELECT COUNT(*) WHERE search_text IS NULL` 必须为 0；未完成则保持 `backfilling`，下次接管继续，不切换。完成后 `fts_phase=backfilled`。
 5. **创建新索引，但保留旧索引**：
    ```sql
@@ -1520,7 +1552,9 @@ INSERT OR IGNORE INTO fts_migration_lock(id) VALUES (1);
 - 同一表上同时存在 `fts(content)` 与 `fts(search_text)` 两个索引时，两种查询都能命中。因此 v1/v2 并存可行；
 - 已有 v1 FTS 索引时，`ALTER TABLE ADD COLUMN search_text` + 回填 + 建 v2 索引可正常工作。
 
-**未验证项**：多实例 lease、heartbeat 和“切换中 kill”尚未用两个进程实跑；S1 必须补这两项，不能只靠单进程 probe。若 Turso 的 `changes()`/条件更新语义与 SQLite 不同，改用显式 `SELECT ... FOR UPDATE` 等价方案（通过单写者串行化保证）并在 spike 记录。
+**验证状态**：两个独立进程的迁移与崩溃恢复由 `fts_migration_crash_recovers_across_processes` 覆盖：回填批次超过 3 秒测试 TTL，另一连接确认 expiry 已续到未来且第二实例不能成为 leader；读者在回填及 v2 索引已创建、状态尚未切换时仍从 content 索引召回；分别杀死 leader 并等待 lease 过期后，新 leader 均能接管并完成切换。新增 `fts_migration_heartbeat_survives_default_production_lease` 使用默认 30 秒 TTL，跨进程回填持续超过该 TTL，验证 lease 仍有效、第二实例不能接管，释放后迁移成功切换。单进程用例另覆盖 lease takeover fencing 与迁移阶段续跑。
+
+**适用范围**：这些测试覆盖项目当前使用的 `turso_core` embedded engine 与条件更新语义；若未来接入远程 Turso/libSQL client，应对远程事务/changes 行为单独做 integration probe，再决定是否需 `SELECT ... FOR UPDATE` 等价方案。
 
 ### 8.2 旧数据
 
@@ -1562,9 +1596,9 @@ INSERT OR IGNORE INTO fts_migration_lock(id) VALUES (1);
 
 ## 9. 性能与评估
 
-### 9.1 当前 benchmark 的问题
+### 9.1 benchmark 修复状态
 
-`pi-memory-bench` 用 `how about {topic}?` 这类英文 query 查中文内容（`pi-memory-bench.rs:142-150`），FTS 很可能为空，实际测到的是“FTS 为空时只取 1 条向量”的路径，不能代表 hybrid recall。它只创建 working memory，不创建 episodic/structured，也不输出 FTS/vector/structured 各自的候选数和命中来源；因此既没有覆盖中文，也没有覆盖多路召回。README 里 5.12ms 之类的数字只能说明“小数据集上不慢”，不能证明“混合召回可用”。
+早期 benchmark 的 query 与 fixture 语言不匹配，且只写 working memory，因此 FTS/vector/structured 混合路径不可观察。该缺口已在当前实现修复：`pi-memory-bench` 写入 10k working memory 及 facts/preferences/instructions/timeline 各 10k 条合成数据，轮换中英文 query，分别输出 FTS/vector/structured 候选数及端到端、structured 查询延迟。`--assert-gates` 要求每张结构化表至少 10k 行，并在 structured P95 >20ms 或端到端 recall P95 >100ms 时返回失败；2026-11-23 本地 10k 门槛运行结果与口径见 README。这仍是性能证据，不是实际项目记忆的质量评估。
 
 ### 9.2 新 benchmark 口径
 
@@ -1734,9 +1768,10 @@ LIMIT ?limit;
 | `PI_MEMORY_FTS_TOP_K` | 50 | FTS 候选数 |
 | `PI_MEMORY_VECTOR_TOP_K` | 50 | 向量候选数 |
 | `PI_MEMORY_STRUCTURED_TOP_K` | 30 | 结构化候选数 |
+| `PI_MEMORY_STRUCTURED_TERM_LIMIT` | 2 | 每次结构化 LIKE 查询的 term 数上限；可设为 1–3 |
 | `PI_MEMORY_RRF_K` | 60 | RRF 平滑 |
 | `PI_MEMORY_RECALL_MIN_SCORE` | 0.012 | 低于该 RRF 分数的候选丢弃 |
-| `PI_MEMORY_RECALL_RELATIVE_CUTOFF` | 0.5 | 低于最高分该比例的候选丢弃 |
+| `PI_MEMORY_RECALL_RELATIVE_CUTOFF` | 0.2 | 低于最高分该比例的候选丢弃 |
 | `PI_MEMORY_RECALL_MODE` | `hybrid` | `legacy` = v0.1.16 行为（向量 allowlist + 百分位 FTS）；M1 回退 PR-1.6，M2 回退 RRF |
 | `PI_MEMORY_LLM_ASYNC` | 1 | 0 = 同步 retain（调试） |
 | `PI_MEMORY_AUTO_CONSOLIDATE` | 1 | 0 = 只手动 consolidation |
@@ -1744,11 +1779,11 @@ LIMIT ?limit;
 | `PI_MEMORY_CONSOLIDATION_LEASE_MS` | 180000 | consolidation claim lease；心跳间隔 TTL/3 |
 | `PI_MEMORY_LEGACY_CONSOLIDATION` | 0 | 1 = 兼容旧 `consolidateSessionMemories(llm_result)`，不保证 `summary_of` |
 | `PI_MEMORY_FTS_MIGRATION_LEASE_MS` | 30000 | FTS 迁移 leader lease；心跳间隔 10s |
-| `PI_MEMORY_FTS_MODE` | `search_text` | 可选 `ngram` / `content` |
-| `PI_MEMORY_MAX_OPEN_PROJECTS` | 8 | runtime LRU |
+| `PI_MEMORY_FTS_MODE` | 跟随数据库迁移状态（迁移完成后为 `search_text`） | `content` 强制回退旧索引；`search_text` 跟随持久化状态，不越过未完成迁移；`ngram` 和未知值明确报错 |
+| `PI_MEMORY_MAX_OPEN_PROJECTS` | 16 | runtime LRU；范围 1–256，仅驱逐无共享引用的 idle 项目 |
 | `PI_MEMORY_MODEL_MANIFEST` | 空 | 自定义模型 manifest 路径 |
 | `PI_MEMORY_MODEL_VERIFY` | 1 | 0 = 跳过模型 hash 校验；**仅 dev/debug 构建生效**，仍校验结构/维度/tokenizer |
-| `PI_MEMORY_EMBEDDING_MODEL` | 空 | 模型 id/路径（PR-2.5） |
+| `PI_MEMORY_EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | 活动模型 ID，必须匹配 manifest 的 `model_id`（PR-2.5） |
 
 ---
 
@@ -1765,6 +1800,6 @@ LIMIT ?limit;
 
 按当前范围，单人顺序执行约 **8–10 周**；M1（v0.1.17）约 **2.5–3 周**。如果 S1 不通过，PR-1.7 与依赖它的 PR-1.6 都不得进入 v0.1.17；先实现并验证替代 FTS 查询方案，只有替代方案通过 CJK、Top-K 和性能门槛后，才允许两项同批发布。若替代方案也未通过，则该版本明确标注中文 FTS 未修复，并将中文召回列为已知 P0；不得只发布 PR-1.6 或宣称完成止血。
 
-第三轮审阅指出的 partial claim、`source_sha` 完成态、PR-1.7 → PR-1.6 顺序和模型 manifest 已并入（见 1.5）。第四轮审阅指出的 consolidation 事务边界、FTS 多实例迁移、clear/migrate 原子性承诺和 `VERIFY=0` 边界已并入（见 1.6）。第五轮补充的 Retain 快照冲突、FTS fencing、clear dirty 状态持久化和 S1 发布门禁已纳入测试矩阵 #59–#61。第六轮明确旧 server 回滚写入可能产生的 NULL `search_text`：新版恢复时先退回 v1、查询可用，再回填并切回 v2；见 8.1/8.3 和测试 #62。第七轮补齐 stale LLM 结果不复用、已 consolidated working 更新后的旧 episodic 失效/重算、migrate 崩溃 dirty 状态和 FTS DDL fencing 边界（见 1.7 / PR-1.2 / PR-2.6 / 8.1，测试 #63–#66）。
+第三轮审阅指出的 partial claim、`source_sha` 完成态、PR-1.7 → PR-1.6 顺序和模型 manifest 已并入（见 1.5）。第四轮审阅指出的 consolidation 事务边界、FTS 多实例迁移、clear/migrate 原子性承诺和 `VERIFY=0` 边界已并入（见 1.6）。第五轮补充的 Retain 快照冲突、FTS fencing、clear dirty 状态持久化和 S1 发布门禁已纳入测试矩阵 #59–#61。第六轮明确旧 server 回滚写入可能产生的 NULL `search_text`：新版恢复时先退回 v1、查询可用，再回填并切回 v2；见 8.1/8.3 和测试 #62。第七轮补齐 stale LLM 结果不复用、已 consolidated working 更新后的旧 episodic 失效/重算、migrate 崩溃 dirty 状态和 FTS DDL fencing 边界（见 1.7 / PR-1.2 / PR-2.6 / 8.1，测试 #63–#67）；随后新增默认 30 秒生产租约的跨进程 heartbeat 覆盖（测试 #68），四表 10k structured gate 与英文 FTS stop-word 回归（测试 #69–#70），PR-4.1 recall 注入预算逻辑的单元覆盖（测试 #71），purge scope/embedding/向量 hydrate 一致性覆盖（测试 #72），diagnose 成本指标生命周期覆盖（测试 #73），Unix 数据目录与主数据库文件权限覆盖（测试 #74），有引用保护的 idle runtime LRU 验收（测试 #75），以及 legacy partial retain 重放和 LLM-only 旧项清理（测试 #76）。
 
-当前计划的可执行边界是：**事务只覆盖 DB 写入，长操作（LLM、embedding、FTS/向量重建）用 lease + 版本校验 + 可重入状态机放在事务外；任何跨事务步骤都不承诺整体回滚，只承诺可恢复的 `partial` 状态。** 按这个边界拆 issue，验收标准可以直接对应测试矩阵里的 #47–#66。
+当前计划的可执行边界是：**事务只覆盖 DB 写入，长操作（LLM、embedding、FTS/向量重建）用 lease + 版本校验 + 可重入状态机放在事务外；任何跨事务步骤都不承诺整体回滚，只承诺可恢复的 `partial` 状态。** 按这个边界拆 issue，验收标准可以直接对应测试矩阵里的 #47–#76。

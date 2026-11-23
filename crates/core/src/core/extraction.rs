@@ -14,6 +14,7 @@ pub struct ExtractStructuredMemoriesOptions {
     pub session_id: String,
     pub project_scope: String,
     pub text: String,
+    pub timestamp: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -25,7 +26,9 @@ pub struct StructuredExtractionResult {
 }
 
 /// Rule-heuristic extraction (matches extractWithHeuristics).
-pub fn extract_with_heuristics(options: &ExtractStructuredMemoriesOptions) -> StructuredExtractionResult {
+pub fn extract_with_heuristics(
+    options: &ExtractStructuredMemoriesOptions,
+) -> StructuredExtractionResult {
     let mut facts = Vec::new();
     let mut preferences = Vec::new();
     let mut instructions = Vec::new();
@@ -55,7 +58,7 @@ pub fn extract_with_heuristics(options: &ExtractStructuredMemoriesOptions) -> St
                 source_memory_id: Some(options.retained_turn_id.clone()),
                 session_id: options.session_id.clone(),
                 project_scope: options.project_scope.clone(),
-                created_at: EPOCH_ISO.into(),
+                created_at: options.timestamp.clone(),
             });
             continue;
         }
@@ -71,7 +74,7 @@ pub fn extract_with_heuristics(options: &ExtractStructuredMemoriesOptions) -> St
                 source_memory_id: Some(options.retained_turn_id.clone()),
                 session_id: options.session_id.clone(),
                 project_scope: options.project_scope.clone(),
-                created_at: EPOCH_ISO.into(),
+                created_at: options.timestamp.clone(),
             });
             continue;
         }
@@ -88,7 +91,7 @@ pub fn extract_with_heuristics(options: &ExtractStructuredMemoriesOptions) -> St
                 source_memory_id: Some(options.retained_turn_id.clone()),
                 session_id: options.session_id.clone(),
                 project_scope: options.project_scope.clone(),
-                created_at: EPOCH_ISO.into(),
+                created_at: options.timestamp.clone(),
             });
             continue;
         }
@@ -97,10 +100,19 @@ pub fn extract_with_heuristics(options: &ExtractStructuredMemoriesOptions) -> St
         }
     }
 
-    StructuredExtractionResult { facts, preferences, instructions, timeline }
+    StructuredExtractionResult {
+        facts,
+        preferences,
+        instructions,
+        timeline,
+    }
 }
 
-fn create_fact(options: &ExtractStructuredMemoriesOptions, index: usize, statement: &str) -> FactRecord {
+fn create_fact(
+    options: &ExtractStructuredMemoriesOptions,
+    index: usize,
+    statement: &str,
+) -> FactRecord {
     let parsed = parse_fact_statement(statement);
     FactRecord {
         fact_id: format!("{}:fact:{}", options.retained_turn_id, index),
@@ -111,7 +123,7 @@ fn create_fact(options: &ExtractStructuredMemoriesOptions, index: usize, stateme
         source_memory_id: Some(options.retained_turn_id.clone()),
         session_id: options.session_id.clone(),
         project_scope: options.project_scope.clone(),
-        timestamp: EPOCH_ISO.into(),
+        timestamp: options.timestamp.clone(),
     }
 }
 
@@ -124,7 +136,10 @@ fn infer_preference(line: &str) -> Option<&str> {
         return None;
     }
     // Matches JS `/^我更?/`: strip a leading "我更" or "我"
-    let stripped = line.strip_prefix("我更").or_else(|| line.strip_prefix("我")).unwrap_or(line);
+    let stripped = line
+        .strip_prefix("我更")
+        .or_else(|| line.strip_prefix("我"))
+        .unwrap_or(line);
     Some(stripped.trim())
 }
 
@@ -161,7 +176,9 @@ fn is_date_like(s: &str) -> bool {
 }
 
 fn looks_like_fact(statement: &str) -> bool {
-    ["正式采用", "采用", "是"].iter().any(|marker| statement.contains(marker))
+    ["正式采用", "采用", "是"]
+        .iter()
+        .any(|marker| statement.contains(marker))
 }
 
 fn parse_fact_statement(statement: &str) -> (String, String, String) {
@@ -177,7 +194,11 @@ fn parse_fact_statement(statement: &str) -> (String, String, String) {
         }
     }
     // Fallback: subject = object = statement, predicate = "记录为"
-    (statement.to_string(), "记录为".to_string(), statement.to_string())
+    (
+        statement.to_string(),
+        "记录为".to_string(),
+        statement.to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -190,6 +211,7 @@ mod tests {
             session_id: "session-1".into(),
             project_scope: "/p".into(),
             text: text.into(),
+            timestamp: "2026-01-02T03:04:05.000Z".into(),
         }
     }
 
@@ -209,11 +231,17 @@ mod tests {
         assert_eq!(fact.object, "本地 SQLite");
         assert_eq!(fact.source_memory_id.as_deref(), Some("wm-1"));
         assert_eq!(fact.confidence, 0.8);
-        assert_eq!(fact.timestamp, EPOCH_ISO);
+        assert_eq!(fact.timestamp, "2026-01-02T03:04:05.000Z");
 
         assert_eq!(result.preferences.len(), 1);
-        assert_eq!(result.preferences[0].preference, "默认自动 recall，不要手动命令驱动");
-        assert_eq!(result.preferences[0].topic.as_deref(), Some("user-preference"));
+        assert_eq!(
+            result.preferences[0].preference,
+            "默认自动 recall，不要手动命令驱动"
+        );
+        assert_eq!(
+            result.preferences[0].topic.as_deref(),
+            Some("user-preference")
+        );
 
         assert_eq!(result.instructions.len(), 1);
         assert_eq!(result.instructions[0].instruction, "不要引入 Turso/libSQL");
@@ -221,13 +249,18 @@ mod tests {
 
         assert_eq!(result.timeline.len(), 1);
         assert_eq!(result.timeline[0].date, "2026-08-19");
-        assert_eq!(result.timeline[0].description, "完成 Task 2 的 SQLite schema");
+        assert_eq!(
+            result.timeline[0].description,
+            "完成 Task 2 的 SQLite schema"
+        );
     }
 
     #[test]
     fn infers_from_plain_lines() {
         // 无前缀但含标记的行
-        let result = extract_with_heuristics(&options("我更喜欢命令行\n不要修改 schema\n2026-08-20 发布了 v0.1.2"));
+        let result = extract_with_heuristics(&options(
+            "我更喜欢命令行\n不要修改 schema\n2026-08-20 发布了 v0.1.2",
+        ));
         assert_eq!(result.preferences.len(), 1);
         assert_eq!(result.preferences[0].preference, "喜欢命令行"); // 「我更」→ 剥离
         assert_eq!(result.instructions.len(), 1);
@@ -241,4 +274,3 @@ mod tests {
         assert_eq!(result.facts.len(), 2);
     }
 }
-

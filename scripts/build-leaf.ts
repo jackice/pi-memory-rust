@@ -2,16 +2,16 @@
 /**
  * leaf 包生成：按平台产出 @jackice/pi-memory-rust-<tag> 包。
  *
- * 用法：bun scripts/build-leaf.ts [--tag darwin-arm64]
+ * 用法：bun scripts/build-leaf.ts [--tag=darwin-arm64]
  * 产物：leaf-packages/<tag>/（含二进制 + package.json）
- * 父包 ts/package.json 通过 optionalDependencies 按平台安装。
+ * 仅打包当前宿主架构，避免把本机二进制误标成其他平台。
+ * 父包只更新本次实际生成的 leaf optionalDependency。
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 
 const ROOT = path.join(import.meta.dir, "..");
-const VERSION = "0.1.16";
 const BINARY_NAME = "pi-memory-server";
 
 const TARGETS = [
@@ -21,9 +21,24 @@ const TARGETS = [
   { tag: "win32-x64", os: "win32", cpu: "x64" },
 ];
 
-const tagArg = process.argv.find((a) => a.startsWith("--tag="))?.split("=")[1];
-const targets = tagArg ? TARGETS.filter((t) => t.tag === tagArg) : TARGETS;
+const tsPkgPath = path.join(ROOT, "ts", "package.json");
+const tsPkg = JSON.parse(fs.readFileSync(tsPkgPath, "utf8"));
+const VERSION = tsPkg.version;
+const tagIndex = process.argv.indexOf("--tag");
+const tagArg = process.argv.find((a) => a.startsWith("--tag="))?.split("=")[1]
+  ?? (tagIndex >= 0 ? process.argv[tagIndex + 1] : undefined);
+const hostTag = `${process.platform}-${process.arch}`;
+const targetTag = tagArg ?? hostTag;
+const targets = TARGETS.filter((target) => target.tag === targetTag);
 
+if (targets.length !== 1) {
+  throw new Error(`unsupported target ${targetTag}; choose one of ${TARGETS.map((t) => t.tag).join(", ")}`);
+}
+if (targetTag !== hostTag) {
+  throw new Error(`refusing to package ${targetTag} from ${hostTag}; cross-compile a matching binary first`);
+}
+
+const builtTargets: typeof TARGETS = [];
 for (const target of targets) {
   // 二进制来源：target/release（cargo build --release）或交叉编译产物
   const binarySource = path.join(ROOT, "target", "release", BINARY_NAME);
@@ -48,14 +63,17 @@ for (const target of targets) {
     engines: { node: ">=22.19.0" },
   };
   fs.writeFileSync(path.join(leafDir, "package.json"), JSON.stringify(manifest, null, 2) + "\n");
+  builtTargets.push(target);
   console.log(`[ok] ${target.tag} → ${leafDir}`);
 }
 
 // 汇总：更新 ts/package.json 的 optionalDependencies
-const tsPkgPath = path.join(ROOT, "ts", "package.json");
-const tsPkg = JSON.parse(fs.readFileSync(tsPkgPath, "utf8"));
-tsPkg.optionalDependencies = Object.fromEntries(
-  TARGETS.map((t) => [`@jackice/pi-memory-rust-${t.tag}`, `=${VERSION}`]),
-);
+if (builtTargets.length === 0) {
+  throw new Error(`no leaf binary was built for ${targetTag}`);
+}
+tsPkg.optionalDependencies ??= {};
+for (const target of builtTargets) {
+  tsPkg.optionalDependencies[`@jackice/pi-memory-rust-${target.tag}`] = `=${VERSION}`;
+}
 fs.writeFileSync(tsPkgPath, JSON.stringify(tsPkg, null, 2) + "\n");
 console.log("[ok] ts/package.json optionalDependencies 已更新");

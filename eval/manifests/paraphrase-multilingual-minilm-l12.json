@@ -1,0 +1,24 @@
+{
+  "model_id": "paraphrase-multilingual-MiniLM-L12-v2",
+  "repository": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+  "revision": "207a9f54e4a968a008379b7da3d529cc2011aa87",
+  "model_file": "model_O4.onnx",
+  "tokenizer_file": "tokenizer.json",
+  "dimension": 384,
+  "max_length": 128,
+  "pooling": "mean",
+  "files": [
+    {
+      "remote": "onnx/model_O4.onnx",
+      "name": "model_O4.onnx",
+      "size": 235166264,
+      "sha256": "307bba13f9f5708461169c9f2d633c76c5572919bcc998606b6e5aea46f05db4"
+    },
+    {
+      "remote": "tokenizer.json",
+      "name": "tokenizer.json",
+      "size": 9081518,
+      "sha256": "2c3387be76557bd40970cec13153b3bbf80407865484b209e655e5e4729076b8"
+    }
+  ]
+}

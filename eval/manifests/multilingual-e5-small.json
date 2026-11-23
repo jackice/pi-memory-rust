@@ -1,0 +1,26 @@
+{
+  "model_id": "multilingual-e5-small",
+  "repository": "intfloat/multilingual-e5-small",
+  "revision": "ccc66d3bcd826f577e26b9a4072cc5fe3a7ad6a3",
+  "model_file": "model_O4.onnx",
+  "tokenizer_file": "tokenizer.json",
+  "dimension": 384,
+  "max_length": 512,
+  "pooling": "mean",
+  "query_prefix": "query: ",
+  "document_prefix": "passage: ",
+  "files": [
+    {
+      "remote": "onnx/model_O4.onnx",
+      "name": "model_O4.onnx",
+      "size": 235052531,
+      "sha256": "4654c156f3e4171abc9c716cdb771bf9116455d15ac1aab364aeeede0e3205b0"
+    },
+    {
+      "remote": "tokenizer.json",
+      "name": "tokenizer.json",
+      "size": 17082730,
+      "sha256": "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39"
+    }
+  ]
+}

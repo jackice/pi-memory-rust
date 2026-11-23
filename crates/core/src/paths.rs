@@ -40,10 +40,20 @@ pub fn resolve_project_db_path(data_dir: &std::path::Path, project_scope: &str) 
 }
 
 /// Ensure the project database's parent directory exists.
-pub fn ensure_project_db_dir(data_dir: &std::path::Path, project_scope: &str) -> std::io::Result<PathBuf> {
+pub fn ensure_project_db_dir(
+    data_dir: &std::path::Path,
+    project_scope: &str,
+) -> std::io::Result<PathBuf> {
     let path = resolve_project_db_path(data_dir, project_scope);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for directory in [data_dir, &data_dir.join("memories"), parent] {
+                std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+            }
+        }
     }
     Ok(path)
 }
@@ -68,4 +78,3 @@ mod tests {
         assert!(a.to_string_lossy().ends_with("memory.db"));
     }
 }
-

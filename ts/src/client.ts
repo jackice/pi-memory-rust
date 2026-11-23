@@ -24,6 +24,7 @@ export const DEFAULT_CALL_TIMEOUT_MS = 2000;
 
 /** Max accepted frame size; mirrors the Rust read_frame cap (16 MiB) */
 const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+const MAX_CONSECUTIVE_SOCKET_TIMEOUTS = 3;
 
 /**
  * Unix socket 路径（单例模式：所有 pi 会话复用同一 server 进程）。
@@ -36,7 +37,27 @@ export function socketPath(): string {
 
 /** 单例模式是否启用（默认开启；PI_MEMORY_STDIO=1 强制 stdio 模式用于调试） */
 export function socketModeEnabled(): boolean {
-  return process.env.PI_MEMORY_STDIO !== "1";
+  return process.platform !== "win32" && process.env.PI_MEMORY_STDIO !== "1";
+}
+
+function defaultTimeoutForMethod(method: string): number {
+  switch (method) {
+    case "hello":
+    case "buildRecallInjection":
+    case "retainTurnMemories":
+      return 5_000;
+    case "enqueueTurn":
+    case "claimConsolidation":
+      return 10_000;
+    case "heartbeatConsolidation":
+    case "startJob":
+    case "jobStatus":
+      return 5_000;
+    case "commitConsolidation":
+      return 30_000;
+    default:
+      return DEFAULT_CALL_TIMEOUT_MS;
+  }
 }
 
 export interface RpcError {
@@ -67,15 +88,19 @@ export class MemoryRustClient {
   /** RPC 传输连接：socket 模式为 unix socket 连接（stdio 模式为 null，走 proc.stdio） */
   private conn: net.Socket | null = null;
   private startPromise: Promise<void> | null = null;
+  private reconnectPromise: Promise<void> | null = null;
   private nextId = 1;
   private pending = new Map<number, { resolve: (r: RpcResponse) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   private buffer = Buffer.alloc(0);
   private restartCount = 0;
+  private consecutiveSocketTimeouts = 0;
   private shuttingDown = false;
   private startingUp = false;
+  private readonly hasCustomCallTimeout: boolean;
   private readonly options: Required<ClientOptions>;
 
   constructor(options: ClientOptions = {}) {
+    this.hasCustomCallTimeout = options.callTimeoutMs !== undefined;
     this.options = {
       binaryPath: options.binaryPath ?? resolveBinaryPath(),
       callTimeoutMs: options.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS,
@@ -97,6 +122,10 @@ export class MemoryRustClient {
       throw new Error("pi-memory-rust client is shutting down");
     }
     if (this.isConnected()) return;
+    if (this.reconnectPromise) {
+      await this.reconnectPromise;
+      if (this.isConnected()) return;
+    }
     if (this.startPromise) {
       await this.startPromise;
       return;
@@ -104,7 +133,7 @@ export class MemoryRustClient {
     this.startingUp = true;
     this.startPromise = (async () => {
       try {
-        await this.connectOrSpawn();
+        await this.connectOrSpawn(true);
         const hello = await this.invoke("hello", { version: PROTOCOL_VERSION });
         if (hello.error) {
           throw new Error(`pi-memory-rust handshake failed: ${hello.error.message}`);
@@ -145,12 +174,17 @@ export class MemoryRustClient {
     }
   }
 
-  /** 优雅关闭：socket 模式发 shutdown 并断开连接；server 由自身生命周期管理（空闲退出/最后会话退出），不误杀其他会话共享的进程 */
+  /** 优雅关闭：socket 模式只断开本连接；stdio 模式向独占 server 发送 shutdown。 */
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
-    const conn = this.conn;
     const proc = this.proc;
     if (!this.isConnected() && !proc) return;
+    if (this.options.socketMode) {
+      // The resident server is shared by other clients; it exits on its own idle timeout.
+      this.conn?.destroy();
+      this.conn = null;
+      return;
+    }
     try {
       await this.invoke("shutdown", {}, 500);
     } catch {
@@ -178,23 +212,35 @@ export class MemoryRustClient {
   }
 
   /** 连接或 spawn：socket 模式先尝试复用已有 server，失败再 spawn；stdio 模式直接 spawn */
-  private async connectOrSpawn(): Promise<void> {
+  private async connectOrSpawn(resetRestartCount = false): Promise<void> {
+    if (this.shuttingDown) throw new Error("pi-memory-rust client is shutting down");
     if (!this.options.socketMode) {
-      this.startProcess(true);
+      this.startProcess(resetRestartCount);
       return;
     }
     const sock = socketPath();
     try {
-      this.conn = await this.connectSocket(sock, 300); // 短超时：快速失败则 spawn
-      this.attachConn(this.conn);
+      const conn = await this.connectSocket(sock, 300); // 短超时：快速失败则启动 server
+      if (this.shuttingDown) {
+        conn.destroy();
+        throw new Error("pi-memory-rust client is shutting down");
+      }
+      this.conn = conn;
+      this.attachConn(conn);
       return;
     } catch {
       // 无已有 server（或暂时不可用）：spawn 一个新进程
     }
-    this.startProcess(true);
+    if (this.shuttingDown) throw new Error("pi-memory-rust client is shutting down");
+    if (!this.proc || this.proc.exitCode !== null) this.startProcess(resetRestartCount);
     try {
-      this.conn = await this.connectSocket(sock, 3000); // spawn 后等待 server bind
-      this.attachConn(this.conn);
+      const conn = await this.connectSocket(sock, 3000); // 等待 server bind，或复用正在启动的子进程
+      if (this.shuttingDown) {
+        conn.destroy();
+        throw new Error("pi-memory-rust client is shutting down");
+      }
+      this.conn = conn;
+      this.attachConn(conn);
     } catch (error) {
       throw new Error(`pi-memory-rust failed to connect to server: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -245,6 +291,7 @@ export class MemoryRustClient {
 
   /** 挂接连接事件（帧解析 + 断开处理） */
   private attachConn(conn: net.Socket): void {
+    this.consecutiveSocketTimeouts = 0;
     conn.on("data", (chunk: Buffer) => this.onData(chunk));
     conn.on("error", () => {}); // 连接错误由 close 统一处理
     conn.on("close", () => {
@@ -276,6 +323,7 @@ export class MemoryRustClient {
       // Spawn failure (e.g. the binary was removed between the existsSync check and spawn):
       // fail pending requests and do not auto-restart (retrying a broken binary is pointless)
       this.options.log(`process error: ${error.message}`);
+      if (this.proc !== proc) return;
       for (const [, entry] of this.pending) {
         clearTimeout(entry.timer);
         entry.reject(new Error(`process error: ${error.message}`));
@@ -290,20 +338,21 @@ export class MemoryRustClient {
       this.options.log(chunk.toString().trimEnd());
     });
     proc.on("exit", (code, signal) => {
-      this.onExit(code, signal);
+      this.onExit(proc, code, signal);
     });
   }
 
-  private onExit(code: number | null, signal: string | null): void {
+  private onExit(proc: ChildProcessWithoutNullStreams, code: number | null, signal: string | null): void {
     const reason = signal ? `signal ${signal}` : `exit code ${code}`;
     this.options.log(`process exited: ${reason}`);
+    // A prior launcher can exit after a newer reconnect has already spawned another process.
+    if (this.proc !== proc) return;
     this.proc = null;
-    if (this.conn) {
-      this.conn.destroy(); // close 事件会触发 onDisconnected（统一处理 pending + 重连）
-    } else {
-      // stdio 模式：无 socket 连接，直接走断开处理（含自动重启）
-      this.onDisconnected(`process exited: ${reason}`);
-    }
+    // In socket mode this child may have lost the singleton-server race and exited after
+    // the client connected to another process's healthy server. The socket's own close
+    // event is authoritative for transport failure; child exit alone must not destroy it.
+    if (this.options.socketMode) return;
+    this.onDisconnected(`process exited: ${reason}`);
   }
 
   /** 连接断开/进程退出：失败所有挂起请求，非主动关闭时尝试重连/重启 */
@@ -329,15 +378,17 @@ export class MemoryRustClient {
       entry.reject(new Error(reason));
     }
     this.pending.clear();
-    if (this.shuttingDown || this.startingUp || this.restartCount >= this.options.maxRestarts) {
+    if (this.shuttingDown || this.startingUp || this.reconnectPromise || this.restartCount >= this.options.maxRestarts) {
       return;
     }
     // 有限次重连：先尝试复用（server 可能空闲重启中），失败再 spawn
     this.restartCount += 1;
     this.options.log(`reconnecting (#${this.restartCount})`);
-    this.connectOrSpawn().catch((error) => {
-      this.options.log(`reconnect failed: ${error instanceof Error ? error.message : String(error)}`);
-    });
+    this.reconnectPromise = this.connectOrSpawn()
+      .catch((error) => {
+        this.options.log(`reconnect failed: ${error instanceof Error ? error.message : String(error)}`);
+      })
+      .finally(() => { this.reconnectPromise = null; });
   }
 
   private onData(chunk: Buffer): void {
@@ -362,6 +413,8 @@ export class MemoryRustClient {
       this.buffer = this.buffer.subarray(4 + len);
       try {
         const response = JSON.parse(payload) as RpcResponse;
+        // A late response still proves that the shared transport is making progress.
+        this.consecutiveSocketTimeouts = 0;
         const entry = this.pending.get(response.id);
         if (!entry) continue;
         clearTimeout(entry.timer);
@@ -384,14 +437,22 @@ export class MemoryRustClient {
       if (entry) {
         this.pending.delete(id);
         entry.reject(new Error(`call timed out: ${method}`));
+        if (this.options.socketMode) {
+          this.consecutiveSocketTimeouts += 1;
+          if (this.consecutiveSocketTimeouts >= MAX_CONSECUTIVE_SOCKET_TIMEOUTS) {
+            this.options.log(
+              `${this.consecutiveSocketTimeouts} consecutive RPC timeouts; reconnecting shared socket`,
+            );
+            this.consecutiveSocketTimeouts = 0;
+            this.conn?.destroy();
+          }
+        }
       }
-      // 超时视为无响应：断开连接触发重连（stdio 模式 kill 进程）
-      if (this.options.socketMode) {
-        this.conn?.destroy();
-      } else if (this.proc && this.proc.exitCode === null) {
-        this.proc.kill("SIGKILL");
-      }
-    }, timeoutMs ?? this.options.callTimeoutMs);
+      // RPC cancellation is not supported. Drop only this waiter: the server may finish
+      // the request, while unrelated calls continue to use the shared transport.
+    }, timeoutMs ?? (this.hasCustomCallTimeout
+      ? this.options.callTimeoutMs
+      : defaultTimeoutForMethod(method)));
     timer.unref();
     const promise = new Promise<RpcResponse>((resolve, reject) => {
       this.pending.set(id, { resolve, reject, timer });

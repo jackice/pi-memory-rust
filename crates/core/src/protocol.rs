@@ -49,12 +49,30 @@ pub mod methods {
     pub const BUILD_RECALL_INJECTION: &str = "buildRecallInjection";
     /// Rhythmic retain. params: { turnIndex, text, sessionId, projectScope }
     pub const RETAIN_TURN_MEMORIES: &str = "retainTurnMemories";
+    pub const GET_WORKING_CONTENT: &str = "getWorkingContent";
+    pub const ENQUEUE_TURN: &str = "enqueueTurn";
+    pub const CLAIM_PENDING_TURN: &str = "claimPendingTurn";
+    pub const HEARTBEAT_PENDING_TURN: &str = "heartbeatPendingTurn";
+    pub const COMPLETE_PENDING_TURN: &str = "completePendingTurn";
+    pub const FAIL_PENDING_TURN: &str = "failPendingTurn";
+    pub const LIST_PENDING_TURNS: &str = "listPendingTurns";
+    pub const RECORD_COMPACTION: &str = "recordCompaction";
+    pub const BACKFILL_EMBEDDINGS: &str = "backfillEmbeddings";
     /// Session consolidation. params: { sessionId, projectScope }
     pub const CONSOLIDATE_SESSION_MEMORIES: &str = "consolidateSessionMemories";
+    pub const CLAIM_CONSOLIDATION: &str = "claimConsolidation";
+    pub const COUNT_UNCONSOLIDATED: &str = "countUnconsolidated";
+    pub const HEARTBEAT_CONSOLIDATION: &str = "heartbeatConsolidation";
+    pub const COMMIT_CONSOLIDATION: &str = "commitConsolidation";
+    pub const RELEASE_CONSOLIDATION: &str = "releaseConsolidation";
     /// /memory command. params: { sub, target, projectScope, sessionId }
     pub const MEMORY_COMMAND: &str = "memoryCommand";
     /// Manually trigger model download. params: {}
     pub const PREPARE_MODEL: &str = "prepareModel";
+    /// Start a long-running maintenance job. params: { kind, projectScope, sourcePath?, targetScope?, confirmed? }
+    pub const START_JOB: &str = "startJob";
+    /// Poll a long-running maintenance job. params: { jobId }
+    pub const JOB_STATUS: &str = "jobStatus";
     /// Migrate a legacy SQLite database. params: { sourcePath }
     pub const MIGRATE: &str = "migrate";
     /// Fetch LLM prompt templates. params: {}
@@ -90,15 +108,21 @@ pub mod codes {
 
 impl RpcResponse {
     pub fn ok(id: u64, result: serde_json::Value) -> Self {
-        Self { id, result: Some(result), error: None }
+        Self {
+            id,
+            result: Some(result),
+            error: None,
+        }
     }
 
     pub fn err(id: u64, code: i32, message: impl Into<String>) -> Self {
         Self {
             id,
             result: None,
-            error: Some(RpcError { code, message: message.into() }),
+            error: Some(RpcError {
+                code,
+                message: message.into(),
+            }),
         }
     }
 }
-

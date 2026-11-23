@@ -39,10 +39,27 @@ pub fn parse_llm_extraction(payload: &str) -> LlmExtractionResult {
     };
     LlmExtractionResult {
         facts: parse_list(&parsed, "facts", |v| FactRecord {
-            fact_id: v.get("factId").or(v.get("fact_id")).and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            subject: v.get("subject").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            predicate: v.get("predicate").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            object: v.get("object").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            fact_id: v
+                .get("factId")
+                .or(v.get("fact_id"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            subject: v
+                .get("subject")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            predicate: v
+                .get("predicate")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            object: v
+                .get("object")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
             confidence: v.get("confidence").and_then(|x| x.as_f64()).unwrap_or(0.5),
             source_memory_id: None,
             session_id: String::new(),
@@ -51,7 +68,11 @@ pub fn parse_llm_extraction(payload: &str) -> LlmExtractionResult {
         }),
         preferences: parse_list(&parsed, "preferences", |v| PreferenceRecord {
             id: String::new(),
-            preference: v.get("preference").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            preference: v
+                .get("preference")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
             topic: v.get("topic").and_then(|x| x.as_str()).map(String::from),
             context_snippet: None,
             source_memory_id: None,
@@ -61,7 +82,11 @@ pub fn parse_llm_extraction(payload: &str) -> LlmExtractionResult {
         }),
         instructions: parse_list(&parsed, "instructions", |v| InstructionRecord {
             id: String::new(),
-            instruction: v.get("instruction").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            instruction: v
+                .get("instruction")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
             topic: v.get("topic").and_then(|x| x.as_str()).map(String::from),
             active: v.get("active").and_then(|x| x.as_bool()).unwrap_or(true),
             context_snippet: None,
@@ -72,8 +97,16 @@ pub fn parse_llm_extraction(payload: &str) -> LlmExtractionResult {
         }),
         timeline: parse_list(&parsed, "timeline", |v| TimelineEventRecord {
             event_id: String::new(),
-            date: v.get("date").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            description: v.get("description").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            date: v
+                .get("date")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            description: v
+                .get("description")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
             source: None,
             source_memory_id: None,
             session_id: String::new(),
@@ -83,7 +116,11 @@ pub fn parse_llm_extraction(payload: &str) -> LlmExtractionResult {
     }
 }
 
-fn parse_list<T>(root: &serde_json::Value, key: &str, parse: impl Fn(&serde_json::Value) -> T) -> Vec<T> {
+fn parse_list<T>(
+    root: &serde_json::Value,
+    key: &str,
+    parse: impl Fn(&serde_json::Value) -> T,
+) -> Vec<T> {
     root.get(key)
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().map(parse).collect())

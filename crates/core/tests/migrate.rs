@@ -1,6 +1,6 @@
 //! 迁移工具测试：旧库（SQLite 兼容格式）→ 新库，数据完整 + FTS 可搜。
 
-use pi_memory_core::models::{MemoryEmbeddingRecord, MemoryKind, WorkingMemoryRecord};
+use pi_memory_core::models::{FactRecord, MemoryEmbeddingRecord, MemoryKind, WorkingMemoryRecord};
 use pi_memory_core::storage::{Storage, TursoStorage};
 
 fn temp_db(name: &str) -> String {
@@ -13,11 +13,20 @@ fn temp_db(name: &str) -> String {
 
 fn wm(id: &str, content: &str, scope: &str) -> WorkingMemoryRecord {
     WorkingMemoryRecord {
-        id: id.into(), content: content.into(), embed_text: Some(content.into()), source: None,
-        session_id: "s1".into(), project_scope: scope.into(), importance: 0.5,
-        memory_type: "working".into(), metadata: None,
-        created_at: "2026-08-19T03:00:00.000Z".into(), updated_at: "2026-08-19T03:00:00.000Z".into(),
-        consolidated_at: None, valid_until: None, superseded_by: None,
+        id: id.into(),
+        content: content.into(),
+        embed_text: Some(content.into()),
+        source: None,
+        session_id: "s1".into(),
+        project_scope: scope.into(),
+        importance: 0.5,
+        memory_type: "working".into(),
+        metadata: None,
+        created_at: "2026-08-19T03:00:00.000Z".into(),
+        updated_at: "2026-08-19T03:00:00.000Z".into(),
+        consolidated_at: None,
+        valid_until: None,
+        superseded_by: None,
     }
 }
 
@@ -26,12 +35,20 @@ fn migrate_old_db_preserves_data_and_fts() {
     // 1. 造旧库（模拟 TS 版 pi-memory 数据）
     let old = temp_db("migrate-old.db");
     let old_storage = TursoStorage::open(&old).expect("旧库打开失败");
-    old_storage.insert_working(&wm("wm-1", "事实: 首版正式采用本地 SQLite", "/proj/demo")).unwrap();
-    old_storage.insert_working(&wm("wm-2", "项目使用 turbovec 向量索引", "/proj/demo")).unwrap();
-    old_storage.save_embedding(&MemoryEmbeddingRecord {
-        memory_kind: MemoryKind::Working, memory_id: "wm-1".into(),
-        embedding: vec![0.1, 0.2], model: "old-model".into(),
-    }).unwrap();
+    old_storage
+        .insert_working(&wm("wm-1", "事实: 首版正式采用本地 SQLite", "/proj/demo"))
+        .unwrap();
+    old_storage
+        .insert_working(&wm("wm-2", "项目使用 turbovec 向量索引", "/proj/demo"))
+        .unwrap();
+    old_storage
+        .save_embedding(&MemoryEmbeddingRecord {
+            memory_kind: MemoryKind::Working,
+            memory_id: "wm-1".into(),
+            embedding: vec![0.1, 0.2],
+            model: "old-model".into(),
+        })
+        .unwrap();
     drop(old_storage);
 
     // 2. 迁入新库
@@ -42,12 +59,17 @@ fn migrate_old_db_preserves_data_and_fts() {
     assert_eq!(stats["embeddings"], 1, "embedding 应迁移");
 
     // 3. 数据完整性
-    let row = new_storage.get_working("wm-1").expect("查询失败").expect("wm-1 应存在");
+    let row = new_storage
+        .get_working("wm-1")
+        .expect("查询失败")
+        .expect("wm-1 应存在");
     assert_eq!(row.content, "事实: 首版正式采用本地 SQLite");
     assert_eq!(row.project_scope, "/proj/demo");
 
     // 4. FTS 可搜（Tantivy 索引重建后）
-    let hits = new_storage.search_working_fts("turbovec", "/proj/demo").expect("FTS 失败");
+    let hits = new_storage
+        .search_working_fts("turbovec", "/proj/demo")
+        .expect("FTS 失败");
     assert!(!hits.is_empty(), "迁移后 FTS 应可命中");
     assert_eq!(hits[0].0.id, "wm-2");
 
@@ -61,6 +83,83 @@ fn migrate_old_db_preserves_data_and_fts() {
 }
 
 #[test]
+fn migrate_scope_imports_only_the_selected_project_and_keeps_source_readable() {
+    let source = temp_db("migrate-scope-source.db");
+    let source_storage = TursoStorage::open(&source).expect("open source");
+    source_storage
+        .insert_working(&wm("scope-a", "selected scope memory", "/scope/a"))
+        .unwrap();
+    source_storage
+        .insert_working(&wm("scope-b", "other scope memory", "/scope/b"))
+        .unwrap();
+    source_storage
+        .insert_facts(&[
+            FactRecord {
+                fact_id: "fact-a".into(),
+                subject: "project".into(),
+                predicate: "uses".into(),
+                object: "A".into(),
+                confidence: 0.9,
+                source_memory_id: Some("scope-a".into()),
+                session_id: "s1".into(),
+                project_scope: "/scope/a".into(),
+                timestamp: "2026-08-19".into(),
+            },
+            FactRecord {
+                fact_id: "fact-b".into(),
+                subject: "project".into(),
+                predicate: "uses".into(),
+                object: "B".into(),
+                confidence: 0.9,
+                source_memory_id: Some("scope-b".into()),
+                session_id: "s1".into(),
+                project_scope: "/scope/b".into(),
+                timestamp: "2026-08-19".into(),
+            },
+        ])
+        .unwrap();
+    drop(source_storage);
+    let source_files_before =
+        ["", "-wal"].map(|suffix| std::fs::read(format!("{source}{suffix}")).ok());
+
+    let destination = temp_db("migrate-scope-destination.db");
+    let destination_storage = TursoStorage::open(&destination).expect("open destination");
+    let stats = destination_storage
+        .migrate_from_scope(&source, Some("/scope/a"))
+        .expect("scope migration");
+
+    assert_eq!(stats["working"], 1);
+    assert_eq!(stats["facts"], 1);
+    assert!(destination_storage
+        .get_working("scope-a")
+        .unwrap()
+        .is_some());
+    assert!(destination_storage
+        .get_working("scope-b")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        destination_storage.list_all_facts().unwrap()[0].fact_id,
+        "fact-a"
+    );
+    assert_eq!(destination_storage.count_working().unwrap(), 1);
+
+    let source_files_after =
+        ["", "-wal"].map(|suffix| std::fs::read(format!("{source}{suffix}")).ok());
+    assert_eq!(
+        source_files_after, source_files_before,
+        "source DB bytes stay unchanged"
+    );
+
+    drop(destination_storage);
+    for path in [&source, &destination] {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{path}{suffix}"));
+        }
+    }
+}
+
+#[test]
 fn migrate_large_db_completes_and_fts_works() {
     // 回归防护：大库迁移（2 万条）必须在有限时间内完成、数据完整、FTS 可搜。
     // 曾因 libSQL multiprocess WAL 在多事务大写入下 panic（frame id 单调性）导致迁移崩溃。
@@ -71,7 +170,11 @@ fn migrate_large_db_completes_and_fts_works() {
     old_storage.begin_tx().expect("begin");
     for i in 0..20_000 {
         old_storage
-            .insert_working(&wm(&format!("w{i}"), &format!("迁移内容 alpha {i:05}"), "/proj/demo"))
+            .insert_working(&wm(
+                &format!("w{i}"),
+                &format!("迁移内容 alpha {i:05}"),
+                "/proj/demo",
+            ))
             .expect("insert");
     }
     old_storage.commit_tx().expect("commit");
@@ -88,9 +191,11 @@ fn migrate_large_db_completes_and_fts_works() {
         started.elapsed()
     );
 
-    let hits = new_storage.search_working_fts("alpha", "/proj/demo").expect("FTS 失败");
-    assert!(!hits.is_empty(), "迁移后 FTS 应可命中");
-    assert!(hits.len() >= 20_000, "应命中全部 2 万条（实际 {}）", hits.len());
+    assert_eq!(new_storage.count_working().expect("计数失败"), 20_000);
+    let hits = new_storage
+        .search_working_fts_top_k("alpha", "/proj/demo", 50)
+        .expect("FTS 失败");
+    assert_eq!(hits.len(), 50, "迁移后 FTS Top-K 应可命中");
 
     let _ = std::fs::remove_file(&old);
     let _ = std::fs::remove_file(&new);

@@ -1,0 +1,40 @@
+{"query":"如何限制每个项目的运行时缓存增长？","relevantIds":["working:eval:cache"],"language":"zh","kinds":["working"]}
+{"query":"What bounds memory use as the number of projects grows?","relevantIds":["working:eval:cache"],"language":"en","kinds":["working"]}
+{"query":"中文全文检索怎样避免整句精确匹配？","relevantIds":["working:eval:fts"],"language":"zh","kinds":["working"]}
+{"query":"How does CJK tokenization improve full text search?","relevantIds":["working:eval:fts"],"language":"en","kinds":["working"]}
+{"query":"FTS 没有结果时如何仍然找出语义相关记忆？","relevantIds":["working:eval:vector"],"language":"zh","kinds":["working"]}
+{"query":"How are vector candidates retrieved independently from FTS?","relevantIds":["working:eval:vector"],"language":"en","kinds":["working"]}
+{"query":"turn_end 怎么保证任务持久化并异步处理？","relevantIds":["working:eval:outbox"],"language":"zh","kinds":["working"]}
+{"query":"How are user prompts retained after a process restart?","relevantIds":["working:eval:outbox"],"language":"en","kinds":["working"]}
+{"query":"本地 socket 如何防止同时启动多个服务？","relevantIds":["working:eval:socket"],"language":"zh","kinds":["working"]}
+{"query":"What permissions protect the local Unix socket?","relevantIds":["working:eval:socket"],"language":"en","kinds":["working"]}
+{"query":"working 和 structured 写入如何避免半成功？","relevantIds":["working:eval:retain"],"language":"zh","kinds":["working"]}
+{"query":"How does the source hash make retain retries idempotent?","relevantIds":["working:eval:retain"],"language":"en","kinds":["working"]}
+{"query":"摘要生成期间怎样避免一直持有数据库事务？","relevantIds":["working:eval:consolidation"],"language":"zh","kinds":["working"]}
+{"query":"How does lease based consolidation commit safely?","relevantIds":["working:eval:consolidation"],"language":"en","kinds":["working"]}
+{"query":"模型文件损坏如何通过可信摘要值检测？","relevantIds":["working:eval:model"],"language":"zh","kinds":["working"]}
+{"query":"How are model downloads pinned and verified?","relevantIds":["working:eval:model"],"language":"en","kinds":["working"]}
+{"query":"session compact 前后要保存哪些检查点？","relevantIds":["working:eval:compaction"],"language":"zh","kinds":["working"]}
+{"query":"What is recorded around session compaction?","relevantIds":["working:eval:compaction"],"language":"en","kinds":["working"]}
+{"query":"数据库和日志如何保护用户隐私？","relevantIds":["working:eval:privacy"],"language":"zh","kinds":["working"]}
+{"query":"How are memory files and logs protected on a shared machine?","relevantIds":["working:eval:privacy"],"language":"en","kinds":["working"]}
+{"query":"clear 和 migrate 怎么按项目范围隔离？","relevantIds":["working:eval:scope"],"language":"zh","kinds":["working"]}
+{"query":"How does migration avoid importing another project's data?","relevantIds":["working:eval:scope"],"language":"en","kinds":["working"]}
+{"query":"旧模型的向量缺失时如何补齐？","relevantIds":["working:eval:backfill"],"language":"zh","kinds":["working"]}
+{"query":"How are missing embeddings backfilled without retry loops?","relevantIds":["working:eval:backfill"],"language":"en","kinds":["working"]}
+{"query":"三路召回分数怎样融合成最终排序？","relevantIds":["working:eval:rrf"],"language":"zh","kinds":["working"]}
+{"query":"How are FTS, vector, and structured rankings combined?","relevantIds":["working:eval:rrf"],"language":"en","kinds":["working"]}
+{"query":"过期的 episodic 记忆如何清理向量索引？","relevantIds":["working:eval:expire"],"language":"zh","kinds":["working"]}
+{"query":"How does purge remove expired memories and vectors?","relevantIds":["working:eval:expire"],"language":"en","kinds":["working"]}
+{"query":"一个 RPC 超时会不会关闭共享连接？","relevantIds":["working:eval:timeout"],"language":"zh","kinds":["working"]}
+{"query":"What happens to other requests when one RPC times out?","relevantIds":["working:eval:timeout"],"language":"en","kinds":["working"]}
+{"query":"项目越多时，服务如何回收不再使用的内存索引？","relevantIds":["working:eval:cache"],"language":"zh","kinds":["working"]}
+{"query":"How does the server avoid keeping every workspace runtime in memory forever?","relevantIds":["working:eval:cache"],"language":"en","kinds":["working"]}
+{"query":"只记得中文句子中的一小段，也能搜到完整的长记录吗？","relevantIds":["working:eval:fts"],"language":"zh","kinds":["working"]}
+{"query":"Why can a short Chinese fragment match a longer stored note?","relevantIds":["working:eval:fts"],"language":"en","kinds":["working"]}
+{"query":"措辞不同而且没有相同关键词时，哪条路径还能找到相关记忆？","relevantIds":["working:eval:vector"],"language":"zh","kinds":["working"]}
+{"query":"Which retrieval path can find a paraphrase when keyword search returns nothing?","relevantIds":["working:eval:vector"],"language":"en","kinds":["working"]}
+{"query":"服务崩溃重启后，未完成的 turn 提取任务怎么恢复？","relevantIds":["working:eval:outbox"],"language":"zh","kinds":["working"]}
+{"query":"How does queued memory extraction resume after the process restarts?","relevantIds":["working:eval:outbox"],"language":"en","kinds":["working"]}
+{"query":"共用电脑上的其他账户如何避免看到我的记忆数据？","relevantIds":["working:eval:privacy"],"language":"zh","kinds":["working"]}
+{"query":"How are memory files isolated from other accounts on a shared workstation?","relevantIds":["working:eval:privacy"],"language":"en","kinds":["working"]}

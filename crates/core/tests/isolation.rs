@@ -7,7 +7,9 @@ use pi_memory_core::runtime::{build_recall_injection, retain_turn_memories};
 use pi_memory_core::storage::TursoStorage;
 
 fn isolated_test_dir(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join("pi-memory-rust-isolation").join(name);
+    let dir = std::env::temp_dir()
+        .join("pi-memory-rust-isolation")
+        .join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -37,18 +39,47 @@ fn isolation_blocks_cross_project_recall() {
     let mut vectors_b = ProjectVectors::new().unwrap();
 
     // A 项目写入一条记忆
-    retain_turn_memories(&storage_a, 1, "事实: 项目A使用 Rust 重写", "s1", "/proj/a", &shared, &mut vectors_a, None).unwrap();
+    retain_turn_memories(
+        &storage_a,
+        1,
+        "事实: 项目A使用 Rust 重写",
+        "s1",
+        "/proj/a",
+        &shared,
+        &mut vectors_a,
+        None,
+    )
+    .unwrap();
 
     // B 项目查同样关键词：不应命中 A 的记忆
-    let injection_b = build_recall_injection(&storage_b, "Rust 重写", "/proj/b", "s1", &shared, &mut vectors_b).unwrap();
+    let injection_b = build_recall_injection(
+        &storage_b,
+        "Rust 重写",
+        "/proj/b",
+        "s1",
+        &shared,
+        &mut vectors_b,
+    )
+    .unwrap();
     assert!(
         !injection_b.contains("项目A"),
         "B 项目不应召回 A 项目的记忆: {injection_b}"
     );
 
     // A 项目自己查：应命中
-    let injection_a = build_recall_injection(&storage_a, "Rust 重写", "/proj/a", "s1", &shared, &mut vectors_a).unwrap();
-    assert!(injection_a.contains("项目A"), "A 项目应召回自己的记忆: {injection_a}");
+    let injection_a = build_recall_injection(
+        &storage_a,
+        "Rust 重写",
+        "/proj/a",
+        "s1",
+        &shared,
+        &mut vectors_a,
+    )
+    .unwrap();
+    assert!(
+        injection_a.contains("项目A"),
+        "A 项目应召回自己的记忆: {injection_a}"
+    );
 
     // 物理文件独立
     assert_ne!(storage_a.db_path(), storage_b.db_path());
@@ -63,8 +94,36 @@ fn same_project_shared_session_state() {
     let mut vectors = ProjectVectors::new().unwrap();
 
     // 同一项目多次 retain：turnIndex 幂等
-    retain_turn_memories(&storage, 1, "记忆1", "s1", "/proj/a", &shared, &mut vectors, None).unwrap();
-    retain_turn_memories(&storage, 1, "记忆1 重复", "s1", "/proj/a", &shared, &mut vectors, None).unwrap();
-    assert_eq!(storage.count_working().unwrap(), 1, "同一 turn 不应重复 retain");
-    assert_eq!(storage.count_by_session("facts", "s1").unwrap(), 0, "无事实前缀不提取");
+    retain_turn_memories(
+        &storage,
+        1,
+        "记忆1",
+        "s1",
+        "/proj/a",
+        &shared,
+        &mut vectors,
+        None,
+    )
+    .unwrap();
+    retain_turn_memories(
+        &storage,
+        1,
+        "记忆1 重复",
+        "s1",
+        "/proj/a",
+        &shared,
+        &mut vectors,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        storage.count_working().unwrap(),
+        1,
+        "同一 turn 不应重复 retain"
+    );
+    assert_eq!(
+        storage.count_by_session("facts", "s1").unwrap(),
+        0,
+        "无事实前缀不提取"
+    );
 }

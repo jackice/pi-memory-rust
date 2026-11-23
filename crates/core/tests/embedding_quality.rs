@@ -16,13 +16,18 @@ fn semantic_similarity_quality() {
     let similar_b = "用户喜欢用中文交流".to_string();
     let different = "项目使用 turbovec 向量索引".to_string();
 
-    let vectors = embedder.embed(&[similar_a.clone(), similar_b, different]).expect("embed 失败");
+    let vectors = embedder
+        .embed(&[similar_a.clone(), similar_b, different])
+        .expect("embed 失败");
     let (a, b, c) = (&vectors[0], &vectors[1], &vectors[2]);
 
     let sim_ab: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let sim_ac: f32 = a.iter().zip(c.iter()).map(|(x, y)| x * y).sum();
 
     println!("相似文本余弦: {sim_ab:.4}，不同文本余弦: {sim_ac:.4}");
-    assert!(sim_ab > sim_ac, "相似文本相似度应显著高于不同文本（{sim_ab} vs {sim_ac}）");
+    assert!(
+        sim_ab > sim_ac,
+        "相似文本相似度应显著高于不同文本（{sim_ab} vs {sim_ac}）"
+    );
     assert!(sim_ab > 0.5, "相似文本余弦应较高（实际 {sim_ab}）");
 }

@@ -61,6 +61,27 @@ pub struct WorkingMemoryRecord {
     pub superseded_by: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkingClaim {
+    pub id: String,
+    pub content: String,
+    pub source_sha: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingTurn {
+    pub session_id: String,
+    pub turn_index: i64,
+    pub project_scope: String,
+    pub text: String,
+    pub prompt_missing: bool,
+    pub attempts: u32,
+    pub lease_owner: String,
+    pub lease_expires_at: String,
+}
+
 /// episodic_memory record (matches EpisodicMemoryRecord)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EpisodicMemoryRecord {
@@ -168,4 +189,3 @@ pub struct SessionStateRecord {
     pub last_retained_user_turn: i64,
     pub has_recalled_for_first_turn: bool,
 }
-

@@ -4,7 +4,7 @@
 //! - allowlist filtering: re-rank the FTS coarse candidates (filtered inside the SIMD kernel);
 //! - persistence: `sync` incrementally writes a standalone index file (DB BLOB approach evaluated in M3).
 
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use turbovec::IdMapIndex;
 
@@ -17,6 +17,7 @@ pub const BIT_WIDTH: usize = 4;
 pub struct VectorIndex {
     index: Mutex<IdMapIndex>,
     next_id: Mutex<u64>,
+    dim: usize,
     /// Persistence file path (None means persistence is disabled)
     sync_path: Option<std::path::PathBuf>,
 }
@@ -36,6 +37,7 @@ impl VectorIndex {
         Ok(Self {
             index: Mutex::new(index),
             next_id: Mutex::new(0),
+            dim,
             sync_path,
         })
     }
@@ -45,19 +47,21 @@ impl VectorIndex {
         if vectors.is_empty() {
             return Ok(Vec::new());
         }
-        let dim = vectors[0].len();
-        let mut flat = Vec::with_capacity(vectors.len() * dim);
+        let mut flat = Vec::with_capacity(vectors.len() * self.dim);
         for v in vectors {
-            anyhow::ensure!(v.len() == dim, "vector dimension mismatch");
+            self.validate_vector(v)?;
             flat.extend_from_slice(v);
         }
-        let mut next = self.next_id.lock().expect("mutex poisoned");
+        let mut next = lock_unpoisoned(&self.next_id, "vector id counter");
         let start = *next;
-        let ids: Vec<u64> = (start..start + vectors.len() as u64).collect();
-        *next += vectors.len() as u64;
+        let end = start
+            .checked_add(vectors.len() as u64)
+            .ok_or_else(|| anyhow::anyhow!("vector id counter overflow"))?;
+        let ids: Vec<u64> = (start..end).collect();
+        *next = end;
         drop(next);
 
-        let mut index = self.index.lock().expect("mutex poisoned");
+        let mut index = lock_unpoisoned(&self.index, "vector index");
         index
             .add_with_ids(&flat, &ids)
             .map_err(|e| anyhow::anyhow!("turbovec add failed: {e:?}"))?;
@@ -72,19 +76,22 @@ impl VectorIndex {
         if vectors.is_empty() {
             return Ok(());
         }
-        let dim = vectors[0].len();
-        let mut flat = Vec::with_capacity(vectors.len() * dim);
+        let mut flat = Vec::with_capacity(vectors.len() * self.dim);
         for vector in vectors {
-            anyhow::ensure!(vector.len() == dim, "vector dimension mismatch");
+            self.validate_vector(vector)?;
             flat.extend_from_slice(vector);
         }
-        let mut index = self.index.lock().expect("mutex poisoned");
+        let mut index = lock_unpoisoned(&self.index, "vector index");
         index
             .add_with_ids(&flat, ids)
             .map_err(|e| anyhow::anyhow!("turbovec restore failed: {e:?}"))?;
         drop(index);
-        let next = ids.iter().copied().max().map_or(0, |id| id.saturating_add(1));
-        let mut next_id = self.next_id.lock().expect("mutex poisoned");
+        let next = ids
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |id| id.saturating_add(1));
+        let mut next_id = lock_unpoisoned(&self.next_id, "vector id counter");
         *next_id = (*next_id).max(next);
         Ok(())
     }
@@ -92,7 +99,7 @@ impl VectorIndex {
     /// Remove (O(1) by id).
     pub fn remove(&self, id: u64) -> anyhow::Result<()> {
         let removed = {
-            let mut index = self.index.lock().expect("mutex poisoned");
+            let mut index = lock_unpoisoned(&self.index, "vector index");
             index.remove(id)
         };
         if !removed {
@@ -113,7 +120,8 @@ impl VectorIndex {
         k: usize,
         allowlist: Option<&[u64]>,
     ) -> anyhow::Result<Vec<VectorHit>> {
-        let index = self.index.lock().expect("mutex poisoned");
+        self.validate_vector(query)?;
+        let index = lock_unpoisoned(&self.index, "vector index");
         let (scores, ids) = index
             .search_with_allowlist(query, k, allowlist)
             .map_err(|e| anyhow::anyhow!("turbovec search failed: {e:?}"))?;
@@ -126,12 +134,7 @@ impl VectorIndex {
 
     /// Number of vectors in the index.
     pub fn len(&self) -> usize {
-        self.index.lock().expect("mutex poisoned").len()
-    }
-
-    /// Next allocatable external id.
-    pub(crate) fn next_id_hint(&self) -> u64 {
-        *self.next_id.lock().expect("mutex poisoned")
+        lock_unpoisoned(&self.index, "vector index").len()
     }
 
     /// Whether the index is empty.
@@ -142,12 +145,36 @@ impl VectorIndex {
     /// Sync persistence (when enabled).
     fn sync_if_enabled(&self) -> anyhow::Result<()> {
         if let Some(path) = &self.sync_path {
-            let mut index = self.index.lock().expect("mutex poisoned");
+            let mut index = lock_unpoisoned(&self.index, "vector index");
             index
                 .sync(path)
                 .map_err(|e| anyhow::anyhow!("turbovec sync failed: {e:?}"))?;
         }
         Ok(())
     }
+
+    fn validate_vector(&self, vector: &[f32]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            vector.len() == self.dim,
+            "vector dimension mismatch: expected {}, got {}",
+            self.dim,
+            vector.len()
+        );
+        anyhow::ensure!(
+            vector.iter().all(|value| value.is_finite()),
+            "vector contains a non-finite value"
+        );
+        Ok(())
+    }
 }
 
+fn lock_unpoisoned<'a, T>(mutex: &'a Mutex<T>, label: &str) -> MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            mutex.clear_poison();
+            crate::debug_log(&format!("{label} mutex poisoned; recovering guard"));
+            poisoned.into_inner()
+        }
+    }
+}

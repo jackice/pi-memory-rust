@@ -1,0 +1,53 @@
+name: Recall evaluation
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+concurrency:
+  group: recall-eval-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  synthetic-quality-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+
+      - name: Validate pinned model manifests
+        run: >-
+          cargo run --release -p pi-memory-core --bin pi-memory-manifest-check --
+          crates/core/models.lock.json eval/manifests/*.json
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pi-memory-rust/model
+          key: embedding-model-all-minilm-l6-v2-v1
+
+      - name: Run bilingual labeled fixture
+        run: |
+          cargo run --release -p pi-memory-core --bin pi-memory-eval -- \
+            --db /tmp/pi-memory-recall-eval.db \
+            --scope /tmp/pi-memory-recall-eval-project \
+            --seed-fixture > recall-eval-report.txt
+
+      - name: Run cross-lingual semantic fixture
+        run: |
+          cargo run --release -p pi-memory-core --bin pi-memory-eval -- \
+            --db /tmp/pi-memory-semantic-eval.db \
+            --scope /tmp/pi-memory-semantic-eval-project \
+            --dataset eval/semantic-recall.jsonl \
+            --corpus eval/corpus.jsonl \
+            --seed-fixture >> recall-eval-report.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recall-eval-${{ github.run_id }}
+          path: recall-eval-report.txt
+          if-no-files-found: error

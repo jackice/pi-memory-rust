@@ -15,7 +15,11 @@ fn unit_vector(dim: usize, seed: f32) -> Vec<f32> {
 #[test]
 fn add_search_basic() {
     let index = VectorIndex::new(8, None).expect("创建索引失败");
-    let vectors = vec![unit_vector(8, 0.0), unit_vector(8, 1.0), unit_vector(8, 2.0)];
+    let vectors = vec![
+        unit_vector(8, 0.0),
+        unit_vector(8, 1.0),
+        unit_vector(8, 2.0),
+    ];
     let ids = index.add(&vectors).expect("add 失败");
     assert_eq!(ids, vec![0, 1, 2]);
 
@@ -28,11 +32,17 @@ fn add_search_basic() {
 #[test]
 fn allowlist_filters_results() {
     let index = VectorIndex::new(8, None).expect("创建索引失败");
-    let vectors = vec![unit_vector(8, 0.0), unit_vector(8, 1.0), unit_vector(8, 2.0)];
+    let vectors = vec![
+        unit_vector(8, 0.0),
+        unit_vector(8, 1.0),
+        unit_vector(8, 2.0),
+    ];
     index.add(&vectors).expect("add 失败");
 
     // 只允许 id=1：查询 id=0 方向时只能命中 1（次优），而不是 0
-    let hits = index.search_with_allowlist(&unit_vector(8, 0.0), 3, Some(&[1])).expect("检索失败");
+    let hits = index
+        .search_with_allowlist(&unit_vector(8, 0.0), 3, Some(&[1]))
+        .expect("检索失败");
     assert_eq!(hits.len(), 1, "allowlist 外不应返回");
     assert_eq!(hits[0].id, 1);
 }
@@ -40,7 +50,9 @@ fn allowlist_filters_results() {
 #[test]
 fn remove_omits_vector() {
     let index = VectorIndex::new(8, None).expect("创建索引失败");
-    index.add(&[unit_vector(8, 0.0), unit_vector(8, 1.0)]).expect("add 失败");
+    index
+        .add(&[unit_vector(8, 0.0), unit_vector(8, 1.0)])
+        .expect("add 失败");
 
     index.remove(0).expect("remove 失败");
     let hits = index.search(&unit_vector(8, 0.0), 1).expect("检索失败");
@@ -57,7 +69,9 @@ fn sync_persistence_roundtrip() {
     // 写入
     {
         let index = VectorIndex::new(8, Some(path.clone())).expect("创建索引失败");
-        index.add(&[unit_vector(8, 0.0), unit_vector(8, 3.0)]).expect("add 失败");
+        index
+            .add(&[unit_vector(8, 0.0), unit_vector(8, 3.0)])
+            .expect("add 失败");
     }
     // 读取：turbovec 的 sync 文件可被 IdMapIndex::load 恢复（由 VectorIndex 后续支持 load）
     let restored = turbovec::IdMapIndex::load(&path).expect("load 失败");
@@ -88,13 +102,15 @@ fn hydrate_rebuilds_project_vector_index() {
         consolidated_at: None,
         valid_until: None,
         superseded_by: None,
-    }).unwrap();
+    })
+    .unwrap();
     db.save_embedding(&MemoryEmbeddingRecord {
         memory_kind: MemoryKind::Working,
         memory_id: "wm-1".into(),
         embedding: vec![0.1; 384],
-        model: "model".into(),
-    }).unwrap();
+        model: pi_memory_core::embedding_runtime::active_model_id(),
+    })
+    .unwrap();
 
     let mut vectors = ProjectVectors::new().unwrap();
     vectors.hydrate(&db).unwrap();
@@ -134,7 +150,7 @@ fn clear_then_rebuild_drops_stale_vectors() {
         memory_kind: MemoryKind::Working,
         memory_id: "wm-1".into(),
         embedding: vec![0.5; 384],
-        model: "model".into(),
+        model: pi_memory_core::embedding_runtime::active_model_id(),
     })
     .unwrap();
 
@@ -147,5 +163,42 @@ fn clear_then_rebuild_drops_stale_vectors() {
     let mut rebuilt = ProjectVectors::new().unwrap();
     rebuilt.hydrate(&db).unwrap();
     assert_eq!(rebuilt.index_len(), 0, "clear 并重建后索引应为空（无残留）");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn hydrate_ignores_embeddings_from_inactive_models() {
+    let dir = std::env::temp_dir().join("pi-memory-rust-test-stale-model");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = TursoStorage::open(dir.join("memory.db").to_str().unwrap()).unwrap();
+    db.insert_working(&WorkingMemoryRecord {
+        id: "stale-vector".into(),
+        content: "旧模型向量仍有对应记忆".into(),
+        embed_text: None,
+        source: Some("test".into()),
+        session_id: "s1".into(),
+        project_scope: "/proj/a".into(),
+        importance: 0.5,
+        memory_type: "working".into(),
+        metadata: None,
+        created_at: "2026-08-21T00:00:00.000Z".into(),
+        updated_at: "2026-08-21T00:00:00.000Z".into(),
+        consolidated_at: None,
+        valid_until: None,
+        superseded_by: None,
+    })
+    .unwrap();
+    db.save_embedding(&MemoryEmbeddingRecord {
+        memory_kind: MemoryKind::Working,
+        memory_id: "stale-vector".into(),
+        embedding: vec![0.1; 384],
+        model: "retired-model".into(),
+    })
+    .unwrap();
+
+    let mut vectors = ProjectVectors::new().unwrap();
+    vectors.hydrate(&db).unwrap();
+    assert_eq!(vectors.index_len(), 0, "旧模型向量不能进入当前索引");
     let _ = std::fs::remove_dir_all(&dir);
 }

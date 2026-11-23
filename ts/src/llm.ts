@@ -7,15 +7,15 @@
  * - failures degrade to rule extraction in the caller (retain/consolidate already fall back).
  */
 
-import type { Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import type { LlmProvider } from "../index.ts";
 
 export interface PiAiLlmContext {
   /** The current active model (ctx.model) */
-  model: Model;
+  model: Model<Api>;
   /** pi's model registry (ctx.modelRegistry) */
   registry: {
-    complete(model: Model, context: unknown): Promise<{ content: Array<{ type: string; text?: string }> }>;
+    complete(model: Model<Api>, context: unknown): Promise<{ content: Array<{ type: string; text?: string }> }>;
   };
 }
 

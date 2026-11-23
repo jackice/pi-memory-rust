@@ -1,0 +1,40 @@
+{"query":"When many workspaces are open, how can their service objects avoid accumulating without bound?","relevantIds":["working:eval:cache"],"language":"en","kinds":["working"]}
+{"query":"What should keep live project contexts from permanently filling process memory?","relevantIds":["working:eval:cache"],"language":"en","kinds":["working"]}
+{"query":"Why can a whole Chinese sentence fail to match a shorter passage, and what representation makes partial lookup work?","relevantIds":["working:eval:fts"],"language":"en","kinds":["working"]}
+{"query":"How do we make substring retrieval work for ideographs without treating a prompt as one exact phrase?","relevantIds":["working:eval:fts"],"language":"en","kinds":["working"]}
+{"query":"How can meaning-based candidates be found even if the keyword search returned nothing?","relevantIds":["working:eval:vector"],"language":"en","kinds":["working"]}
+{"query":"Which retrieval path should still supply nearest matches when lexical matching has no useful hits?","relevantIds":["working:eval:vector"],"language":"en","kinds":["working"]}
+{"query":"How do we make conversation extraction survive a process restart without losing accepted turns?","relevantIds":["working:eval:outbox"],"language":"en","kinds":["working"]}
+{"query":"What lets a background job resume abandoned dialogue processing after its worker disappears?","relevantIds":["working:eval:outbox"],"language":"en","kinds":["working"]}
+{"query":"How does the local service prevent two copies from binding the same endpoint while protecting its filesystem entry?","relevantIds":["working:eval:socket"],"language":"en","kinds":["working"]}
+{"query":"What mechanism enforces a single local listener and restricts who can access its IPC path?","relevantIds":["working:eval:socket"],"language":"en","kinds":["working"]}
+{"query":"How can retries update extracted knowledge without leaving a half-written turn behind?","relevantIds":["working:eval:retain"],"language":"en","kinds":["working"]}
+{"query":"What makes storing a turn's raw note and derived facts succeed or fail as one database change?","relevantIds":["working:eval:retain"],"language":"en","kinds":["working"]}
+{"query":"How can a long summary be produced without holding a database write transaction open?","relevantIds":["working:eval:consolidation"],"language":"en","kinds":["working"]}
+{"query":"What sequence lets workers reserve a group, summarize it, then verify it has not changed before saving?","relevantIds":["working:eval:consolidation"],"language":"en","kinds":["working"]}
+{"query":"How do we detect that downloaded neural weights are the exact trusted build before loading them?","relevantIds":["working:eval:model"],"language":"en","kinds":["working"]}
+{"query":"What prevents a corrupted model artifact from being used, and how should repeated download failures behave?","relevantIds":["working:eval:model"],"language":"en","kinds":["working"]}
+{"query":"What should happen to pending extraction work immediately before old conversation text is compacted away?","relevantIds":["working:eval:compaction"],"language":"en","kinds":["working"]}
+{"query":"How can a shortened conversation retain a verifiable summary checkpoint of the text it replaced?","relevantIds":["working:eval:compaction"],"language":"en","kinds":["working"]}
+{"query":"Which filesystem and logging rules keep private remembered content from leaking through local diagnostics?","relevantIds":["working:eval:privacy"],"language":"en","kinds":["working"]}
+{"query":"How are stored notes protected from other local users and from appearing in logs?","relevantIds":["working:eval:privacy"],"language":"en","kinds":["working"]}
+{"query":"How can an erase request for one workspace avoid removing another workspace's stored history?","relevantIds":["working:eval:scope"],"language":"en","kinds":["working"]}
+{"query":"What prevents importing records belonging to unrelated projects into the selected local database?","relevantIds":["working:eval:scope"],"language":"en","kinds":["working"]}
+{"query":"How should missing representations for old entries be rebuilt without scanning the same blank record forever?","relevantIds":["working:eval:backfill"],"language":"en","kinds":["working"]}
+{"query":"What is the safe background process for creating embeddings that are absent or tied to an obsolete encoder?","relevantIds":["working:eval:backfill"],"language":"en","kinds":["working"]}
+{"query":"How do results from exact-word matching, semantic similarity, and database fields become one ordered list?","relevantIds":["working:eval:rrf"],"language":"en","kinds":["working"]}
+{"query":"What ranking method combines positions from several independently searched sources?","relevantIds":["working:eval:rrf"],"language":"en","kinds":["working"]}
+{"query":"How should records past their validity date be removed along with the corresponding nearest-neighbor entries?","relevantIds":["working:eval:expire"],"language":"en","kinds":["working"]}
+{"query":"What cleanup operation drops obsolete notes and keeps the semantic index synchronized?","relevantIds":["working:eval:expire"],"language":"en","kinds":["working"]}
+{"query":"If one request waits too long, how can the rest of the shared connection continue working normally?","relevantIds":["working:eval:timeout"],"language":"en","kinds":["working"]}
+{"query":"What should a caller deadline cancel locally without killing the server or other in-flight calls?","relevantIds":["working:eval:timeout"],"language":"en","kinds":["working"]}
+{"query":"多人并行改代码时，怎样让每个人的工作区互不覆盖？","relevantIds":["working:semantic:worktree"],"language":"zh","kinds":["working"]}
+{"query":"隔离不同开发任务的 Git 环境，防止文件改动互相冲突，应该怎么做？","relevantIds":["working:semantic:worktree"],"language":"zh","kinds":["working"]}
+{"query":"调用方超时放弃等待，是否意味着服务器已经做了一半的写入会自动撤回？","relevantIds":["working:semantic:timeout"],"language":"zh","kinds":["working"]}
+{"query":"远端动作可能在客户端断开后继续完成，重复提交时要满足什么条件才安全？","relevantIds":["working:semantic:timeout"],"language":"zh","kinds":["working"]}
+{"query":"后台任务进程意外退出后，重启的新执行者怎样找回排队中的对话抽取？","relevantIds":["working:semantic:outbox"],"language":"zh","kinds":["working"]}
+{"query":"如何确保待处理的消息先持久化，并在工作者崩溃后重新领取继续处理？","relevantIds":["working:semantic:outbox"],"language":"zh","kinds":["working"]}
+{"query":"编码模型加载期间，怎样仍然让用户查到以前写入的内容？","relevantIds":["working:semantic:model-startup"],"language":"zh","kinds":["working"]}
+{"query":"神经网络还在初始化时，搜索服务靠什么方式继续响应？","relevantIds":["working:semantic:model-startup"],"language":"zh","kinds":["working"]}
+{"query":"关键词列表、向量近邻和结构化字段各自有排序，如何融合成统一排名？","relevantIds":["working:semantic:fusion"],"language":"zh","kinds":["working"]}
+{"query":"把多种独立检索结果按各自名次合并，采用什么排名策略？","relevantIds":["working:semantic:fusion"],"language":"zh","kinds":["working"]}

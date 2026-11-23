@@ -34,7 +34,11 @@ pub struct ConsolidationResult {
 pub fn consolidate_session_memories(
     options: &ConsolidateSessionMemoriesOptions,
 ) -> ConsolidationResult {
-    let working_memory_ids: Vec<String> = options.working_memories.iter().map(|m| m.id.clone()).collect();
+    let working_memory_ids: Vec<String> = options
+        .working_memories
+        .iter()
+        .map(|m| m.id.clone())
+        .collect();
     let source_summary = working_memory_ids.join(",");
     // No LLM in the rule path: degraded = false (TS sets it only when an LLM exists and fails)
     let degraded = false;
@@ -63,8 +67,12 @@ pub fn consolidate_session_memories(
         tier: 1,
         memory_type: "episodic".into(),
         metadata: Some(serde_json::json!({ "degraded": degraded })),
-        created_at: first.map(|m| m.created_at.clone()).unwrap_or_else(|| EPOCH_ISO.into()),
-        updated_at: last.map(|m| m.updated_at.clone()).unwrap_or_else(|| EPOCH_ISO.into()),
+        created_at: first
+            .map(|m| m.created_at.clone())
+            .unwrap_or_else(|| EPOCH_ISO.into()),
+        updated_at: last
+            .map(|m| m.updated_at.clone())
+            .unwrap_or_else(|| EPOCH_ISO.into()),
         degraded_at: None,
         valid_until: None,
         superseded_by: None,
@@ -108,9 +116,15 @@ mod tests {
         assert_eq!(episodic.id, "session-1:episodic:0");
         assert_eq!(episodic.summary_of, "wm-1,wm-2");
         assert_eq!(episodic.memory_type, "episodic");
-        assert_eq!(episodic.content, "implemented SQLite schema and session_state;completed SqliteMemoryStore and FTS sync");
+        assert_eq!(
+            episodic.content,
+            "implemented SQLite schema and session_state;completed SqliteMemoryStore and FTS sync"
+        );
         assert_eq!(episodic.importance, 0.9, "importance takes the max");
-        assert_eq!(episodic.metadata, Some(serde_json::json!({ "degraded": false })));
+        assert_eq!(
+            episodic.metadata,
+            Some(serde_json::json!({ "degraded": false }))
+        );
     }
 
     #[test]
@@ -126,4 +140,3 @@ mod tests {
         assert_eq!(result.episodic_memories[0].content, "");
     }
 }
-

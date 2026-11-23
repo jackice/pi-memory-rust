@@ -16,4 +16,3 @@ pub trait Storage: Send + Sync {
     /// Health check: returns diagnostics such as the database path.
     fn diagnose(&self) -> anyhow::Result<serde_json::Value>;
 }
-
