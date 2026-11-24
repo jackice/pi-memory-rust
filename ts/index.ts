@@ -787,6 +787,16 @@ function estimateApproxTokens(text: string): number {
 
 function notify(ctx: { ui?: UiLike } | undefined, phase: string, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
-  ctx?.ui?.notify?.(`pi-memory-rust ${phase} degraded: ${message}`, "warning");
+  const text = `pi-memory-rust ${phase} degraded: ${message}`;
+  try {
+    ctx?.ui?.notify?.(text, "warning");
+  } catch {
+    // 会话替换或 reload 后 ctx 已失效，ui getter 会抛错；降级提示失败不得影响收尾
+    try {
+      process.stderr.write(`${text}\n`);
+    } catch {
+      // stderr 不可写时丢弃提示
+    }
+  }
 }
 

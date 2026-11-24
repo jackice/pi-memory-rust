@@ -557,3 +557,22 @@ test("missing sessionManager uses a stable process-scoped fallback ID", async ()
   expect(fallbackIds[0]).not.toBe("default-session");
 });
 
+
+test("memory command survives a ctx whose ui getter throws after session replacement", async () => {
+  mockClientMethods();
+  const pi = new FakePi();
+  registerPiMemoryRustExtension(pi as any, {});
+  const staleCtx = {
+    hasUI: true,
+    cwd: "/tmp/pi-memory-test",
+    sessionManager: { getSessionId: () => "session-1" },
+    get ui(): never {
+      throw new Error("This extension ctx is stale after session replacement or reload.");
+    },
+  };
+  const command = pi.commands.get("memory") as {
+    handler: (args: string, context: unknown) => Promise<void>;
+  };
+
+  await expect(command.handler("stats", staleCtx)).resolves.toBeUndefined();
+});
