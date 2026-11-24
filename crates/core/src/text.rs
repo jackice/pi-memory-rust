@@ -137,6 +137,43 @@ fn recall_terms_with_limit(input: &str, limit: usize) -> Vec<String> {
     terms.into_iter().map(|(_, term)| term).collect()
 }
 
+const RECALL_ACKNOWLEDGEMENTS: &[&str] = &[
+    "好",
+    "好的",
+    "嗯",
+    "嗯嗯",
+    "收到",
+    "明白",
+    "继续",
+    "继续吧",
+    "好的继续",
+    "请继续",
+    "再继续",
+    "继续一下",
+    "接着",
+    "往下",
+    "谢谢",
+    "可以",
+    "行",
+    "ok",
+    "okay",
+    "yes",
+    "yep",
+    "sure",
+    "continue",
+    "next",
+    "please",
+    "thanks",
+];
+
+pub fn has_informative_recall_query(input: &str) -> bool {
+    normalize(input)
+        .split(|character: char| !character.is_alphanumeric())
+        .any(|part| {
+            !RECALL_ACKNOWLEDGEMENTS.contains(&part) && part.chars().any(char::is_alphabetic)
+        })
+}
+
 pub fn build_search_text(input: &str) -> String {
     terms(input).join(" ")
 }
@@ -184,5 +221,36 @@ mod tests {
             default_terms[..2].to_vec()
         );
         assert_eq!(recall_terms_with_limit(prompt, 99).len(), 3);
+    }
+    #[test]
+    fn recall_query_gate_rejects_acknowledgements_and_numeric_replies() {
+        for prompt in [
+            "继续",
+            "继续吧。",
+            "好的，继续",
+            "好的继续",
+            "请继续",
+            "好的",
+            "1",
+            "ok",
+            "yes",
+            "continue",
+            "please continue",
+        ] {
+            assert!(!has_informative_recall_query(prompt), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn recall_query_gate_keeps_searchable_topics() {
+        for prompt in [
+            "Rust",
+            "Go",
+            "继续修复 Go",
+            "帮我修复 recall 注入",
+            "今天天气不错",
+        ] {
+            assert!(has_informative_recall_query(prompt), "{prompt}");
+        }
     }
 }

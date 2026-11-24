@@ -1507,8 +1507,10 @@ fn handle_request(
         }
         methods::BUILD_RECALL_INJECTION => {
             match serde_json::from_value::<RecallParams>(request.params.clone()) {
-                // 空 prompt 不进入检索：custom 消息触发的运行没有用户查询
-                Ok(params) if params.prompt.trim().is_empty() => {
+                // 无信息 prompt 不进入检索，避免无查询内容时加载模型或注入记忆
+                Ok(params)
+                    if !pi_memory_core::text::has_informative_recall_query(&params.prompt) =>
+                {
                     RpcResponse::ok(request.id, serde_json::json!(""))
                 }
                 Ok(params) => match pool.get_or_open(&params.project_scope) {

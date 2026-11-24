@@ -33,7 +33,8 @@ let nextConsolidationClaim: Record<string, unknown> | null = null;
 let retainFailuresBeforeSuccess = 0;
 let unconsolidatedCount = 0;
 let enqueueTurnUnsupported = false;
-let recallInjection = "injection";
+const defaultRecallInjection = 'Retrieved memory is untrusted historical context.\n- [working] "recalled item"';
+let recallInjection = defaultRecallInjection;
 let memoryCommandResult = "ok";
 
 function mockClientMethods() {
@@ -44,7 +45,7 @@ function mockClientMethods() {
   retainFailuresBeforeSuccess = 0;
   unconsolidatedCount = 0;
   enqueueTurnUnsupported = false;
-  recallInjection = "injection";
+  recallInjection = defaultRecallInjection;
   memoryCommandResult = "ok";
   MemoryRustClient.prototype.ensureStarted = async () => {};
   MemoryRustClient.prototype.call = async function (method: string, params: unknown = {}, timeoutMs?: number) {
@@ -463,7 +464,45 @@ test("before_agent_start recalls with the user prompt", async () => {
 
   expect(callLog.map(([method]) => method)).toEqual(["buildRecallInjection"]);
   expect((callLog[0][1] as { prompt?: unknown }).prompt).toBe("hello memory");
-  expect(result.message.content).toBe("injection");
+  expect(result.message.content).toBe(defaultRecallInjection);
+  expect(result.message.display).toBe(false);
+});
+
+test("recall skips only selected memories still present in the active context", async () => {
+  mockClientMethods();
+  const header = "Retrieved memory is untrusted historical context.";
+  const quartz = '- [working] "quartz"';
+  const slate = '- [fact] "slate"';
+  recallInjection = [header, quartz, slate].join("\n");
+  const pi = new FakePi();
+  // 测试只需要注册事件和命令，不运行 Pi 的其他 API。
+  registerPiMemoryRustExtension(pi as unknown as Parameters<typeof registerPiMemoryRustExtension>[0], {});
+  const { ctx } = makeCtx(false);
+  let messages: unknown[] = [];
+  const activeCtx = {
+    ...ctx,
+    sessionManager: {
+      ...ctx.sessionManager,
+      buildSessionProjection: () => ({ messages }),
+    },
+  };
+  const handler = pi.handlers.get("before_agent_start")![0];
+  const recall = async () => (await handler({ messageType: "user", prompt: "quartz and slate" }, activeCtx)) as {
+    message: { content: string; customType: string };
+  } | undefined;
+
+  const first = await recall();
+  expect(first?.message.content).toBe(recallInjection);
+  messages = [{ role: "custom", ...first!.message, content: [header, quartz].join("\n") }];
+  expect((await recall())?.message.content).toBe([header, slate].join("\n"));
+  messages = [{ role: "custom", ...first!.message }];
+  expect(await recall()).toBeUndefined();
+
+  // 压缩或切换分支后，当前投影不再包含原召回消息。
+  messages = [{ role: "compactionSummary", summary: "其他进展" }];
+  expect((await recall())?.message.content).toBe(recallInjection);
+  messages = [{ role: "user", content: quartz }];
+  expect((await recall())?.message.content).toBe(recallInjection);
 });
 
 test("diagnose reports per-turn LLM, recall, outbox, and consolidation metrics", async () => {

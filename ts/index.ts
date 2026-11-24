@@ -28,6 +28,8 @@ interface CtxLike {
   ui?: UiLike;
 }
 
+const RECALL_MESSAGE_TYPE = "pi-memory-rust-recall";
+
 export interface PiMemoryRustOptions {
   /** LLM provider; when absent, retain/consolidate use the rule path (llm=off) */
   llm?: LlmProvider;
@@ -491,18 +493,28 @@ export default function registerPiMemoryRustExtension(
     }
     userPrompts.set(sessionId, prompt.trim());
     try {
-      const injection = await client.call<string>("buildRecallInjection", {
+      const selected = await client.call<string>("buildRecallInjection", {
         prompt,
         sessionId,
         projectScope: resolveProjectScope(ctx),
       });
-      if (!injection) return;
-      costMetrics.injectedMemories += injection.split("\n").filter((line) => line.startsWith("- [")).length;
+      if (!selected) return;
+      // Rust 已按预算和配额选定本轮条目；去重只删除，不补位。
+      const [header, ...lines] = selected.split("\n");
+      const remaining = new Set(lines.filter((line) => line.startsWith("- [")));
+      for (const message of ctx.sessionManager?.buildSessionProjection?.().messages ?? []) {
+        if (message.role !== "custom" || message.customType !== RECALL_MESSAGE_TYPE
+          || typeof message.content !== "string") continue;
+        for (const line of message.content.split("\n")) remaining.delete(line);
+        if (!remaining.size) return;
+      }
+      if (!remaining.size) return;
+      costMetrics.injectedMemories += remaining.size;
       return {
         message: {
-          customType: "pi-memory-rust-recall",
-          content: injection,
-          display: true,
+          customType: RECALL_MESSAGE_TYPE,
+          content: [header, ...remaining].join("\n"),
+          display: false,
         },
       };
     } catch (error) {

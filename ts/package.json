@@ -1,6 +1,6 @@
 {
   "name": "@jackice/pi-memory-rust",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "description": "Rust memory extension for Pi: Turso storage + Tantivy FTS + turbovec vectors + local ONNX embedding",
   "author": "jackice",
   "license": "MIT",
@@ -46,7 +46,7 @@
     "typescript": "^5.9.3"
   },
   "optionalDependencies": {
-    "@jackice/pi-memory-rust-darwin-arm64": "=0.1.17"
+    "@jackice/pi-memory-rust-darwin-arm64": "=0.1.19"
   },
   "main": "./index.ts"
 }

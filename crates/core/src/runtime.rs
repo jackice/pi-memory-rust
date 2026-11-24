@@ -200,6 +200,10 @@ pub fn build_recall_injection(
     shared: &dyn EmbeddingProvider,
     vectors: &mut ProjectVectors,
 ) -> anyhow::Result<String> {
+    if !crate::text::has_informative_recall_query(prompt) {
+        return Ok(String::new());
+    }
+
     let RecallSources {
         fts: fts_candidates,
         vector: embedding_candidates,
@@ -357,7 +361,7 @@ fn render_recall_candidates(
         .clamp(100, 1_200);
     let mut counts = std::collections::HashMap::<MemoryKind, usize>::new();
     let mut structured_injected = 0usize;
-    let mut selected = Vec::<(MemoryKind, String, String)>::new();
+    let mut selected = Vec::<(String, String)>::new();
     let mut selected_topics = Vec::<std::collections::HashSet<String>>::new();
     let mut injected_with_fts = 0usize;
     let mut injected_with_vector = 0usize;
@@ -396,7 +400,7 @@ fn render_recall_candidates(
         let normalized = normalize_recall_text(&content);
         if selected
             .iter()
-            .any(|(_, existing, _)| near_duplicate(&normalized, existing))
+            .any(|(existing, _)| near_duplicate(&normalized, existing))
         {
             dropped_duplicate += 1;
             dropped_candidates.push(recall_drop_diagnostic(candidate, "near_duplicate"));
@@ -429,7 +433,7 @@ fn render_recall_candidates(
         injected_with_vector += usize::from(candidate.score_breakdown.embedding_rank.is_some());
         injected_with_structured +=
             usize::from(candidate.score_breakdown.structured_rank.is_some());
-        selected.push((candidate.memory_kind, normalized, rendered));
+        selected.push((normalized, rendered));
         selected_topics.push(topic_terms);
     }
     crate::debug_log(&format!(
@@ -486,7 +490,7 @@ fn render_recall_candidates(
         "{untrusted_header}\n{}",
         selected
             .into_iter()
-            .map(|(_, _, rendered)| rendered)
+            .map(|(_, rendered)| rendered)
             .collect::<Vec<_>>()
             .join("\n")
     )
@@ -2036,6 +2040,76 @@ mod tests {
             "a rejected retain must not advance the durable session checkpoint"
         );
         drop(concurrent_writer);
+        drop(storage);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+    #[test]
+    fn recall_selection_is_not_consumed_by_a_previous_request() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "pi-memory-recall-session-dedup-{}-{nonce}.db",
+            std::process::id(),
+        ));
+        let storage = crate::storage::TursoStorage::open_deferred(
+            path.to_str().expect("temporary path is UTF-8"),
+        )
+        .expect("open storage");
+        storage
+            .insert_working(&WorkingMemoryRecord {
+                id: "working-1".into(),
+                content: "quartz retrieval target".into(),
+                embed_text: None,
+                source: Some("turn_end".into()),
+                session_id: "session-1".into(),
+                project_scope: "/project".into(),
+                importance: 0.5,
+                memory_type: "working".into(),
+                metadata: None,
+                created_at: "2026-11-24T00:00:00.000Z".into(),
+                updated_at: "2026-11-24T00:00:00.000Z".into(),
+                consolidated_at: None,
+                valid_until: None,
+                superseded_by: None,
+            })
+            .expect("insert memory");
+        let shared = crate::embedding_runtime::FakeEmbedder;
+        let mut vectors = ProjectVectors::new().expect("create vectors");
+        let abstained = super::build_recall_injection(
+            &storage,
+            "继续",
+            "/project",
+            "session-1",
+            &shared,
+            &mut vectors,
+        )
+        .expect("non-informative prompt abstains");
+        assert!(abstained.is_empty());
+        let first = super::build_recall_injection(
+            &storage,
+            "find quartz retrieval target",
+            "/project",
+            "session-1",
+            &shared,
+            &mut vectors,
+        )
+        .expect("first recall");
+        let second = super::build_recall_injection(
+            &storage,
+            "find quartz retrieval target",
+            "/project",
+            "session-1",
+            &shared,
+            &mut vectors,
+        )
+        .expect("second recall");
+
+        assert!(first.contains("- [working]"), "first recall: {first}");
+        assert_eq!(second, first, "重复请求不应改变服务端选中的记忆");
         drop(storage);
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));

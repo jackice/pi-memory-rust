@@ -1315,7 +1315,9 @@ COMMIT;
 - 注入前按 token/字符预算选择（先启发式：CJK 1 字≈1 token，英文 4 字符≈1 token；上限 800–1200）；
 - 每类配额：working ≤3、episodic ≤2、structured ≤4；
 - 近似去重：PR-2.4 已做“内容 hash 完全相同 + `summary_of` 关联 working”的精确去重；本 PR 增加 near-duplicate（归一化后编辑距离/SimHash）与同主题配额；
-- `diagnose` 输出候选数/注入 token/丢弃原因（阈值、去重、配额、预算）。
+- Rust `diagnose` 输出预算内入选候选数、预计 token 和丢弃原因；扩展的 `injected_memories_per_100_turns` 统计实际注入条目。
+- 空输入、纯数字及明确的确认/继续短语不触发自动召回；保留 `Go` 等可能是检索主题的歧义词。
+- Pi 扩展以当前分支压缩后的消息投影为准，从 Rust 已选结果中移除仍在上下文中的相同记忆文本，不用低排名候选补位，不在记忆库持久化去重状态。自动召回隐藏在对话 UI 中（`display: false`），仍属于模型上下文。
 
 #### PR-4.2 评估与成本指标
 
