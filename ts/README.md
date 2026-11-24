@@ -10,7 +10,7 @@ See the repository root `README.md` for full documentation (this package is the 
 - `src/client.ts` — JSON-RPC client + persistent process lifecycle management
 - The native binary ships in per-platform leaf packages: `@jackice/pi-memory-rust-<platform>-<arch>` (declared in `optionalDependencies`)
 
-The `0.1.17` npm release currently supports **macOS arm64 only**. npm will reject installation on other OS/CPU combinations; publish platform-matched leaf binaries before expanding this range.
+The `0.1.18` npm release currently supports **macOS arm64 only**. npm will reject installation on other OS/CPU combinations; publish platform-matched leaf binaries before expanding this range.
 
 ## Environment variables
 
